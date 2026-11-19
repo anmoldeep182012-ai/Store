@@ -36,7 +36,7 @@ Built with **python-telegram-bot 22.8** (Bot API 10.0) and MongoDB (PyMongo asyn
 - Purchases, wallet changes, and deposit approvals run in MongoDB transactions. Use a MongoDB Atlas replica-set cluster.
 - Each UTR can be used only once. Payment requests expire. Each deposit can be approved only once, even with several admins.
 - Rate limiting, banned-user blocking, admin-only checks on every admin action.
-- All secrets come from `.env`. Session strings are encrypted before they are stored in MongoDB. Keep `SESSION_ENCRYPTION_KEY` private and unchanged across redeployments.
+- All secrets come from `.env`. Session strings and 2FA passwords are encrypted before they are stored in MongoDB. Keep `SESSION_ENCRYPTION_KEY` private and unchanged across redeployments.
 - Telegram user/chat/bot context and pending input state are persisted in MongoDB.
 
 ## 🗄 MongoDB setup
