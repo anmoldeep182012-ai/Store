@@ -107,7 +107,7 @@ class Database:
     async def tx(self) -> AsyncIterator[Any]:
         """Run a multi-document operation in a MongoDB transaction."""
         async with self.client.start_session() as session:
-            async with session.start_transaction():
+            async with await session.start_transaction():
                 yield session
 
     async def _next_id(self, name: str, session: Any) -> int:
@@ -149,7 +149,11 @@ class Database:
         if result is None:
             return None
         result["id"] = document["_id"]
-        result["session"] = self._decrypt_session(document.get("session_enc"))
+        session_enc = result.pop("session_enc", None)
+        twofa_enc = result.pop("twofa_enc", None)
+        legacy_twofa = result.pop("twofa", None)
+        result["session"] = self._decrypt_session(session_enc)
+        result["twofa"] = self._decrypt_session(twofa_enc) if twofa_enc else legacy_twofa
         return result
 
     def _country_out(self, document: Optional[dict], stock: int = 0) -> Optional[dict]:
@@ -332,7 +336,7 @@ class Database:
                     "_id": account_id,
                     "country_id": country_id,
                     "phone": phone,
-                    "twofa": twofa,
+                    "twofa_enc": self._encrypt_session(twofa),
                     "session_enc": self._encrypt_session(session_string),
                     "status": "available",
                     "added_at": now(),
@@ -417,7 +421,10 @@ class Database:
         return self._plain(order) | {
             "id": order["_id"],
             "phone": account["phone"],
-            "twofa": account.get("twofa"),
+            "twofa": (
+                self._decrypt_session(account.get("twofa_enc"))
+                if account.get("twofa_enc") else account.get("twofa")
+            ),
             "session": self._decrypt_session(account.get("session_enc")),
             "country_name": country["name"],
             "country_flag": country["flag"],
