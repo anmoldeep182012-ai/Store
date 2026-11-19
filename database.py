@@ -635,10 +635,11 @@ class Database:
     # ---------------------------------------------------------------- stats
     async def _revenue(self, since: Optional[str]) -> tuple[float, int]:
         match = {"created_at": {"$gte": since}} if since else {}
-        rows = await self.database.orders.aggregate([
+        cursor = await self.database.orders.aggregate([
             {"$match": match},
             {"$group": {"_id": None, "total": {"$sum": "$price"}, "count": {"$sum": 1}}},
-        ]).to_list(length=1)
+        ])
+        rows = await cursor.to_list(length=1)
         if not rows:
             return 0.0, 0
         return float(rows[0]["total"]), int(rows[0]["count"])
@@ -647,13 +648,15 @@ class Database:
         today = local_midnight_utc()
         week = ago(days=7)
         users_today = await self.database.users.count_documents({"joined_at": {"$gte": today}})
-        deposits = await self.database.deposits.aggregate([
+        deposits_cursor = await self.database.deposits.aggregate([
             {"$match": {"status": "approved"}},
             {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-        ]).to_list(length=1)
-        balances = await self.database.users.aggregate([
+        ])
+        deposits = await deposits_cursor.to_list(length=1)
+        balances_cursor = await self.database.users.aggregate([
             {"$group": {"_id": None, "total": {"$sum": "$balance"}}},
-        ]).to_list(length=1)
+        ])
+        balances = await balances_cursor.to_list(length=1)
         return {
             "users": await self.database.users.count_documents({}),
             "users_today": users_today,
