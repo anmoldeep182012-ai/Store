@@ -2,7 +2,7 @@
 
 A Telegram bot for selling Telegram accounts, with colored buttons, UPI deposits, instant delivery, and a button-driven admin panel.
 
-Built with **python-telegram-bot 22.8** (Bot API 10.0) and SQLite.
+Built with **python-telegram-bot 22.8** (Bot API 10.0) and MongoDB (PyMongo async client).
 
 ## ✨ Features
 
@@ -33,17 +33,29 @@ Built with **python-telegram-bot 22.8** (Bot API 10.0) and SQLite.
 - 💾 Database backup sent as a file.
 
 ### 🔒 Safety
-- Purchases run in a single locked database transaction, so the same account is never sold twice and the balance can't go negative.
+- Purchases, wallet changes, and deposit approvals run in MongoDB transactions. Use a MongoDB Atlas replica-set cluster.
 - Each UTR can be used only once. Payment requests expire. Each deposit can be approved only once, even with several admins.
 - Rate limiting, banned-user blocking, admin-only checks on every admin action.
-- All secrets come from `.env`. Nothing is hard-coded.
+- All secrets come from `.env`. Session strings and 2FA passwords are encrypted before they are stored in MongoDB. Keep `SESSION_ENCRYPTION_KEY` private and unchanged across redeployments.
+- Telegram user/chat/bot context and pending input state are persisted in MongoDB.
+
+## 🗄 MongoDB setup
+
+1. Create a MongoDB Atlas cluster and database user.
+2. Add your deployment host to Atlas Network Access (or use a restricted allowlist).
+3. Copy the Atlas connection string into `MONGODB_URI` in `.env` and set `MONGODB_DATABASE`.
+4. Generate `SESSION_ENCRYPTION_KEY` once using the command in `.env.example`. Save it securely; losing or changing this key makes previously encrypted session strings unreadable.
+5. Use an Atlas replica-set cluster: purchase and deposit operations rely on MongoDB transactions.
+
+The MongoDB migration does not automatically import an existing `store.db` SQLite file. If your deployed bot already has records in SQLite, export/retain that database and migrate its data before switching the live deployment.
 
 ## 🚀 Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env      # then edit BOT_TOKEN, ADMIN_IDS, UPI_ID, ...
+cp .env.example .env      # then edit BOT_TOKEN, ADMIN_IDS, MONGODB_URI, ...
+# Generate SESSION_ENCRYPTION_KEY using the command shown in .env.example
 python bot.py
 ```
 
@@ -123,7 +135,8 @@ Use `-` for empty fields. The **session** is a Telethon `StringSession`. When it
 ```
 bot.py               entry point, gate (ban / maintenance / rate limit), error handler
 config.py            settings from .env
-database.py          SQLite schema and all queries (atomic purchase, deposits, coupons, stats)
+database.py          MongoDB collections and all data operations
+mongo_persistence.py MongoDB persistence for Telegram user/chat/bot state
 core.py              screen rendering, text-input states, admin notifications
 ui/theme.py          colored button helpers, card layout, formatting
 handlers/user.py     home, shop, purchase, orders, OTP, wallet, referral, gift codes, help
@@ -134,4 +147,4 @@ services/otp.py      optional Telethon OTP reader
 
 ## 💡 Tips
 - Set `LOG_CHANNEL_ID` to get every sale and approved deposit posted to a private channel.
-- Take a 💾 Backup regularly. The file contains account details, so keep it private.
+- Take a 💾 Backup regularly. The JSON backup contains customer and inventory data, so keep it private.

@@ -1,5 +1,6 @@
 python-telegram-bot[rate-limiter]==22.8
-aiosqlite==0.21.0
+pymongo>=4.13,<5
+cryptography>=44.0
 python-dotenv==1.1.1
 qrcode[pil]==8.2
 # Optional: enables the "Get OTP" button for accounts stocked with a session string

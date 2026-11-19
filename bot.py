@@ -16,6 +16,7 @@ from telegram.ext import (
 import config
 from core import Ctx, clear_state, is_admin, route_input
 from database import db
+from mongo_persistence import MongoPersistence
 from handlers import admin, deposit, user
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -110,6 +111,10 @@ async def post_shutdown(app: Application) -> None:
 def main() -> None:
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is missing. Copy .env.example to .env and fill it in.")
+    if not config.MONGODB_URI:
+        raise SystemExit("MONGODB_URI is missing. Add your MongoDB Atlas URI to .env.")
+    if not config.SESSION_ENCRYPTION_KEY:
+        raise SystemExit("SESSION_ENCRYPTION_KEY is missing. Generate it using the command in .env.example.")
     if not config.ADMIN_IDS:
         log.warning("ADMIN_IDS is empty: nobody can open the admin panel.")
 
@@ -120,6 +125,7 @@ def main() -> None:
         .token(config.BOT_TOKEN)
         .defaults(defaults)
         .rate_limiter(AIORateLimiter(max_retries=2))
+        .persistence(MongoPersistence(config.MONGODB_URI, config.MONGODB_DATABASE))
         .concurrent_updates(True)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
