@@ -1,99 +1,24 @@
-"""Async SQLite data layer.
+"""Async MongoDB data layer.
 
-A single shared connection is used. Every write that touches more than one
-row runs inside `Database.tx()`, which holds an asyncio lock and an
-IMMEDIATE transaction, so purchases and balance changes are atomic and the
-same account can never be sold twice.
+All business records live in MongoDB. Multi-document financial and inventory
+operations use transactions, so MongoDB must be a replica set (MongoDB Atlas
+clusters satisfy this requirement).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
-import aiosqlite
+from cryptography.fernet import Fernet, InvalidToken
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
+from pymongo import AsyncMongoClient
 
 import config
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    username      TEXT,
-    first_name    TEXT,
-    balance       REAL    NOT NULL DEFAULT 0,
-    total_deposit REAL    NOT NULL DEFAULT 0,
-    total_spent   REAL    NOT NULL DEFAULT 0,
-    referrer_id   INTEGER,
-    ref_earned    REAL    NOT NULL DEFAULT 0,
-    banned        INTEGER NOT NULL DEFAULT 0,
-    joined_at     TEXT    NOT NULL
-);
-CREATE TABLE IF NOT EXISTS countries (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    name    TEXT    NOT NULL,
-    code    TEXT    NOT NULL,
-    flag    TEXT    NOT NULL DEFAULT '🌐',
-    price   REAL    NOT NULL,
-    active  INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS accounts (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    country_id INTEGER NOT NULL REFERENCES countries(id),
-    phone      TEXT    NOT NULL UNIQUE,
-    twofa      TEXT,
-    session    TEXT,
-    status     TEXT    NOT NULL DEFAULT 'available',
-    added_at   TEXT    NOT NULL,
-    sold_at    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_accounts_stock ON accounts(country_id, status);
-CREATE TABLE IF NOT EXISTS orders (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(id),
-    account_id INTEGER NOT NULL REFERENCES accounts(id),
-    country_id INTEGER NOT NULL,
-    price      REAL    NOT NULL,
-    created_at TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
-CREATE TABLE IF NOT EXISTS deposits (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(id),
-    amount     REAL    NOT NULL,
-    utr        TEXT UNIQUE,
-    status     TEXT    NOT NULL DEFAULT 'created',
-    admin_id   INTEGER,
-    created_at TEXT    NOT NULL,
-    updated_at TEXT    NOT NULL
-);
-CREATE TABLE IF NOT EXISTS transactions (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER NOT NULL,
-    type          TEXT    NOT NULL,
-    amount        REAL    NOT NULL,
-    balance_after REAL    NOT NULL,
-    note          TEXT,
-    created_at    TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id);
-CREATE TABLE IF NOT EXISTS coupons (
-    code       TEXT PRIMARY KEY,
-    amount     REAL    NOT NULL,
-    max_uses   INTEGER NOT NULL,
-    used       INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL
-);
-CREATE TABLE IF NOT EXISTS coupon_uses (
-    code    TEXT    NOT NULL,
-    user_id INTEGER NOT NULL,
-    PRIMARY KEY (code, user_id)
-);
-CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
 
 
 def now() -> str:
@@ -117,475 +42,633 @@ class PurchaseError(Exception):
 
 
 class Database:
-    def __init__(self, path: str):
-        self.path = path
-        self.conn: Optional[aiosqlite.Connection] = None
+    COLLECTIONS = (
+        "users", "countries", "accounts", "orders", "deposits",
+        "transactions", "coupons", "coupon_uses", "settings", "counters",
+    )
+
+    def __init__(self, uri: str, database_name: str):
+        self.uri = uri
+        self.database_name = database_name
+        self.client: Optional[AsyncMongoClient] = None
+        self.database = None
+        self.fernet: Optional[Fernet] = None
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------ lifecycle
     async def connect(self) -> None:
-        self.conn = await aiosqlite.connect(self.path, isolation_level=None)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA foreign_keys=ON")
-        await self.conn.executescript(SCHEMA)
+        if not self.uri:
+            raise RuntimeError("MONGODB_URI is missing. Add your MongoDB connection string to .env.")
+        if not config.SESSION_ENCRYPTION_KEY:
+            raise RuntimeError(
+                "SESSION_ENCRYPTION_KEY is missing. Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+        try:
+            self.fernet = Fernet(config.SESSION_ENCRYPTION_KEY.encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise RuntimeError("SESSION_ENCRYPTION_KEY is invalid. Use a Fernet key.") from exc
+
+        self.client = AsyncMongoClient(self.uri, serverSelectionTimeoutMS=10000)
+        self.database = self.client[self.database_name]
+        await self.client.admin.command("ping")
+
+        await self.database.users.create_index("username")
+        await self.database.accounts.create_index("phone", unique=True)
+        await self.database.accounts.create_index(
+            [("country_id", ASCENDING), ("status", ASCENDING)]
+        )
+        await self.database.orders.create_index([("user_id", ASCENDING), ("_id", DESCENDING)])
+        await self.database.deposits.create_index(
+            "utr", unique=True, sparse=True
+        )
+        await self.database.deposits.create_index(
+            [("user_id", ASCENDING), ("status", ASCENDING)]
+        )
+        await self.database.transactions.create_index(
+            [("user_id", ASCENDING), ("_id", DESCENDING)]
+        )
+        await self.database.coupon_uses.create_index(
+            [("code", ASCENDING), ("user_id", ASCENDING)], unique=True
+        )
+
         for key, value in config.DEFAULT_SETTINGS.items():
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value)
+            await self.database.settings.update_one(
+                {"_id": key}, {"$setOnInsert": {"value": value}}, upsert=True
             )
 
     async def close(self) -> None:
-        if self.conn:
-            await self.conn.close()
+        if self.client:
+            await self.client.close()
+            self.client = None
+            self.database = None
 
     @asynccontextmanager
-    async def tx(self) -> AsyncIterator[aiosqlite.Connection]:
-        async with self._lock:
-            await self.conn.execute("BEGIN IMMEDIATE")
-            try:
-                yield self.conn
-            except BaseException:
-                await self.conn.execute("ROLLBACK")
-                raise
-            else:
-                await self.conn.execute("COMMIT")
+    async def tx(self) -> AsyncIterator[Any]:
+        """Run a multi-document operation in a MongoDB transaction."""
+        async with self.client.start_session() as session:
+            async with session.start_transaction():
+                yield session
 
-    async def one(self, sql: str, params: tuple = ()) -> Optional[dict]:
-        async with self.conn.execute(sql, params) as cur:
-            row = await cur.fetchone()
-        return dict(row) if row else None
+    async def _next_id(self, name: str, session: Any) -> int:
+        counter = await self.database.counters.find_one_and_update(
+            {"_id": name},
+            {"$inc": {"value": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+            session=session,
+        )
+        return int(counter["value"])
 
-    async def all(self, sql: str, params: tuple = ()) -> list[dict]:
-        async with self.conn.execute(sql, params) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    @staticmethod
+    def _plain(document: Optional[dict]) -> Optional[dict]:
+        if not document:
+            return None
+        result = dict(document)
+        result.pop("_id", None)
+        return result
 
-    async def scalar(self, sql: str, params: tuple = ()) -> Any:
-        async with self.conn.execute(sql, params) as cur:
-            row = await cur.fetchone()
-        return row[0] if row else None
+    def _encrypt_session(self, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        return self.fernet.encrypt(value.encode("utf-8")).decode("ascii")
 
-    async def run(self, sql: str, params: tuple = ()) -> int:
-        """Run a single write statement. Returns lastrowid."""
-        async with self._lock:
-            cur = await self.conn.execute(sql, params)
-            return cur.lastrowid
+    def _decrypt_session(self, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        try:
+            return self.fernet.decrypt(value.encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeEncodeError) as exc:
+            raise RuntimeError(
+                "A stored session could not be decrypted. Check that SESSION_ENCRYPTION_KEY "
+                "is the same key used when this session was saved."
+            ) from exc
+
+    def _account_out(self, document: Optional[dict]) -> Optional[dict]:
+        result = self._plain(document)
+        if result is None:
+            return None
+        result["id"] = document["_id"]
+        result["session"] = self._decrypt_session(document.get("session_enc"))
+        return result
+
+    def _country_out(self, document: Optional[dict], stock: int = 0) -> Optional[dict]:
+        result = self._plain(document)
+        if result is None:
+            return None
+        result["id"] = document["_id"]
+        result["stock"] = stock
+        return result
 
     # ------------------------------------------------------------- settings
     async def get_setting(self, key: str) -> str:
-        value = await self.scalar("SELECT value FROM settings WHERE key = ?", (key,))
-        return value if value is not None else config.DEFAULT_SETTINGS.get(key, "")
+        item = await self.database.settings.find_one({"_id": key})
+        return item["value"] if item else config.DEFAULT_SETTINGS.get(key, "")
 
     async def set_setting(self, key: str, value: str) -> None:
-        await self.run(
-            "INSERT INTO settings(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+        await self.database.settings.update_one(
+            {"_id": key}, {"$set": {"value": value}}, upsert=True
         )
 
     # ---------------------------------------------------------------- users
     async def upsert_user(self, user_id: int, username: Optional[str], first_name: str,
                           referrer_id: Optional[int] = None) -> bool:
         """Create or refresh a user. Returns True when the user is new."""
-        async with self.tx() as c:
-            async with c.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)) as cur:
-                exists = await cur.fetchone()
-            if exists:
-                await c.execute(
-                    "UPDATE users SET username = ?, first_name = ? WHERE id = ?",
-                    (username, first_name, user_id),
+        async with self.tx() as session:
+            existing = await self.database.users.find_one({"_id": user_id}, session=session)
+            if existing:
+                await self.database.users.update_one(
+                    {"_id": user_id},
+                    {"$set": {"username": username, "first_name": first_name}},
+                    session=session,
                 )
                 return False
+
             if referrer_id == user_id:
                 referrer_id = None
-            if referrer_id:
-                async with c.execute("SELECT 1 FROM users WHERE id = ?", (referrer_id,)) as cur:
-                    if not await cur.fetchone():
-                        referrer_id = None
-            await c.execute(
-                "INSERT INTO users(id, username, first_name, referrer_id, joined_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (user_id, username, first_name, referrer_id, now()),
-            )
+            if referrer_id and not await self.database.users.find_one(
+                {"_id": referrer_id}, {"_id": 1}, session=session
+            ):
+                referrer_id = None
+            await self.database.users.insert_one({
+                "_id": user_id,
+                "username": username,
+                "first_name": first_name,
+                "balance": 0.0,
+                "total_deposit": 0.0,
+                "total_spent": 0.0,
+                "referrer_id": referrer_id,
+                "ref_earned": 0.0,
+                "banned": 0,
+                "joined_at": now(),
+            }, session=session)
             return True
 
     async def get_user(self, user_id: int) -> Optional[dict]:
-        return await self.one("SELECT * FROM users WHERE id = ?", (user_id,))
+        return self._plain(await self.database.users.find_one({"_id": user_id}))
 
     async def find_user(self, query: str) -> Optional[dict]:
         query = query.strip().lstrip("@")
         if query.isdigit():
             return await self.get_user(int(query))
-        return await self.one("SELECT * FROM users WHERE lower(username) = lower(?)", (query,))
+        user = await self.database.users.find_one({
+            "username": {"$regex": f"^{__import__('re').escape(query)}$", "$options": "i"}
+        })
+        return self._plain(user)
 
     async def set_banned(self, user_id: int, banned: bool) -> None:
-        await self.run("UPDATE users SET banned = ? WHERE id = ?", (int(banned), user_id))
+        await self.database.users.update_one(
+            {"_id": user_id}, {"$set": {"banned": int(banned)}}
+        )
 
     async def all_user_ids(self) -> list[int]:
-        rows = await self.all("SELECT id FROM users WHERE banned = 0")
-        return [r["id"] for r in rows]
+        cursor = self.database.users.find({"banned": 0}, {"_id": 1})
+        return [doc["_id"] async for doc in cursor]
 
     async def referral_count(self, user_id: int) -> int:
-        return await self.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
+        return await self.database.users.count_documents({"referrer_id": user_id})
 
-    @staticmethod
-    async def _change_balance(c: aiosqlite.Connection, user_id: int, amount: float,
+    async def _change_balance(self, session: Any, user_id: int, amount: float,
                               tx_type: str, note: str) -> float:
-        async with c.execute("SELECT balance FROM users WHERE id = ?", (user_id,)) as cur:
-            row = await cur.fetchone()
-        if row is None:
+        user = await self.database.users.find_one({"_id": user_id}, session=session)
+        if user is None:
             raise PurchaseError("User not found.")
-        new_balance = round(row["balance"] + amount, 2)
+        new_balance = round(float(user["balance"]) + amount, 2)
         if new_balance < 0:
             raise PurchaseError("Insufficient balance.")
-        await c.execute("UPDATE users SET balance = ? WHERE id = ?", (new_balance, user_id))
-        await c.execute(
-            "INSERT INTO transactions(user_id, type, amount, balance_after, note, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, tx_type, round(amount, 2), new_balance, note, now()),
+        await self.database.users.update_one(
+            {"_id": user_id}, {"$set": {"balance": new_balance}}, session=session
         )
+        tx_id = await self._next_id("transactions", session)
+        await self.database.transactions.insert_one({
+            "_id": tx_id,
+            "user_id": user_id,
+            "type": tx_type,
+            "amount": round(amount, 2),
+            "balance_after": new_balance,
+            "note": note,
+            "created_at": now(),
+        }, session=session)
         return new_balance
 
     async def admin_adjust_balance(self, user_id: int, amount: float, admin_id: int) -> float:
-        async with self.tx() as c:
+        async with self.tx() as session:
             return await self._change_balance(
-                c, user_id, amount, "admin", f"Adjusted by admin {admin_id}"
+                session, user_id, amount, "admin", f"Adjusted by admin {admin_id}"
             )
 
     async def transactions(self, user_id: int, limit: int = 10) -> list[dict]:
-        return await self.all(
-            "SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
-        )
+        cursor = self.database.transactions.find(
+            {"user_id": user_id}
+        ).sort("_id", DESCENDING).limit(limit)
+        return [self._plain(doc) | {"id": doc["_id"]} async for doc in cursor]
 
     # ------------------------------------------------------------ countries
     async def countries(self, only_active: bool = True) -> list[dict]:
-        where = "WHERE c.active = 1" if only_active else ""
-        return await self.all(
-            f"""SELECT c.*, (SELECT COUNT(*) FROM accounts a
-                    WHERE a.country_id = c.id AND a.status = 'available') AS stock
-                FROM countries c {where}
-                ORDER BY stock = 0, c.name"""
-        )
+        query = {"active": 1} if only_active else {}
+        documents = [doc async for doc in self.database.countries.find(query)]
+        result = []
+        for doc in documents:
+            stock = await self.database.accounts.count_documents({
+                "country_id": doc["_id"], "status": "available"
+            })
+            result.append(self._country_out(doc, stock))
+        return sorted(result, key=lambda item: (item["stock"] == 0, item["name"].casefold()))
 
     async def get_country(self, country_id: int) -> Optional[dict]:
-        return await self.one(
-            """SELECT c.*, (SELECT COUNT(*) FROM accounts a
-                    WHERE a.country_id = c.id AND a.status = 'available') AS stock
-               FROM countries c WHERE c.id = ?""",
-            (country_id,),
-        )
+        doc = await self.database.countries.find_one({"_id": country_id})
+        if not doc:
+            return None
+        stock = await self.database.accounts.count_documents({
+            "country_id": country_id, "status": "available"
+        })
+        return self._country_out(doc, stock)
 
     async def add_country(self, name: str, code: str, flag: str, price: float) -> int:
-        return await self.run(
-            "INSERT INTO countries(name, code, flag, price) VALUES (?, ?, ?, ?)",
-            (name, code.upper(), flag, round(price, 2)),
-        )
+        async with self.tx() as session:
+            country_id = await self._next_id("countries", session)
+            await self.database.countries.insert_one({
+                "_id": country_id,
+                "name": name,
+                "code": code.upper(),
+                "flag": flag,
+                "price": round(price, 2),
+                "active": 1,
+            }, session=session)
+            return country_id
 
     async def update_country(self, country_id: int, field: str, value: Any) -> None:
         if field not in {"name", "code", "flag", "price", "active"}:
             raise ValueError(field)
-        await self.run(f"UPDATE countries SET {field} = ? WHERE id = ?", (value, country_id))
+        if field == "price":
+            value = round(float(value), 2)
+        await self.database.countries.update_one(
+            {"_id": country_id}, {"$set": {field: value}}
+        )
 
     async def delete_country(self, country_id: int) -> bool:
-        """Delete a country only if it has never had any accounts."""
-        async with self.tx() as c:
-            async with c.execute(
-                "SELECT COUNT(*) FROM accounts WHERE country_id = ?", (country_id,)
-            ) as cur:
-                if (await cur.fetchone())[0]:
-                    return False
-            await c.execute("DELETE FROM countries WHERE id = ?", (country_id,))
-            return True
+        if await self.database.accounts.count_documents({"country_id": country_id}):
+            return False
+        result = await self.database.countries.delete_one({"_id": country_id})
+        return result.deleted_count > 0
 
     # ------------------------------------------------------------- accounts
     async def add_accounts(self, country_id: int,
                            items: list[tuple[str, Optional[str], Optional[str]]]) -> tuple[int, int]:
         """Insert (phone, twofa, session) items. Returns (added, duplicates)."""
         added = dupes = 0
-        async with self.tx() as c:
-            for phone, twofa, session in items:
-                cur = await c.execute(
-                    "INSERT OR IGNORE INTO accounts(country_id, phone, twofa, session, added_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (country_id, phone, twofa, session, now()),
-                )
-                if cur.rowcount:
-                    added += 1
-                else:
+        async with self.tx() as session:
+            if not await self.database.countries.find_one({"_id": country_id}, session=session):
+                raise ValueError("Country not found.")
+            for phone, twofa, session_string in items:
+                if await self.database.accounts.find_one(
+                    {"phone": phone}, {"_id": 1}, session=session
+                ):
                     dupes += 1
+                    continue
+                account_id = await self._next_id("accounts", session)
+                await self.database.accounts.insert_one({
+                    "_id": account_id,
+                    "country_id": country_id,
+                    "phone": phone,
+                    "twofa": twofa,
+                    "session_enc": self._encrypt_session(session_string),
+                    "status": "available",
+                    "added_at": now(),
+                    "sold_at": None,
+                }, session=session)
+                added += 1
         return added, dupes
 
     async def stock_page(self, country_id: int, offset: int, limit: int) -> list[dict]:
-        return await self.all(
-            "SELECT * FROM accounts WHERE country_id = ? AND status = 'available' "
-            "ORDER BY id LIMIT ? OFFSET ?",
-            (country_id, limit, offset),
-        )
+        cursor = self.database.accounts.find({
+            "country_id": country_id, "status": "available"
+        }).sort("_id", ASCENDING).skip(offset).limit(limit)
+        return [self._account_out(doc) async for doc in cursor]
 
     async def get_account(self, account_id: int) -> Optional[dict]:
-        return await self.one("SELECT * FROM accounts WHERE id = ?", (account_id,))
+        return self._account_out(await self.database.accounts.find_one({"_id": account_id}))
 
     async def delete_account(self, account_id: int) -> bool:
-        async with self._lock:
-            cur = await self.conn.execute(
-                "DELETE FROM accounts WHERE id = ? AND status = 'available'", (account_id,)
-            )
-            return cur.rowcount > 0
+        result = await self.database.accounts.delete_one({
+            "_id": account_id, "status": "available"
+        })
+        return result.deleted_count > 0
 
     # ------------------------------------------------------------- purchase
     async def purchase(self, user_id: int, country_id: int, qty: int) -> list[dict]:
-        """Atomically charge the user and reserve `qty` accounts.
-
-        Returns the created orders joined with account details.
-        Raises PurchaseError with a user-facing message on failure.
-        """
-        async with self.tx() as c:
-            async with c.execute(
-                "SELECT * FROM countries WHERE id = ? AND active = 1", (country_id,)
-            ) as cur:
-                country = await cur.fetchone()
+        """Atomically charge the user and reserve qty accounts."""
+        async with self.tx() as session:
+            country = await self.database.countries.find_one(
+                {"_id": country_id, "active": 1}, session=session
+            )
             if not country:
                 raise PurchaseError("This country is not available right now.")
-            async with c.execute(
-                "SELECT id FROM accounts WHERE country_id = ? AND status = 'available' "
-                "ORDER BY id LIMIT ?",
-                (country_id, qty),
-            ) as cur:
-                account_ids = [r["id"] for r in await cur.fetchall()]
-            if len(account_ids) < qty:
-                raise PurchaseError(f"Only {len(account_ids)} in stock. Please lower the quantity.")
 
-            total = round(country["price"] * qty, 2)
+            cursor = self.database.accounts.find({
+                "country_id": country_id, "status": "available"
+            }, session=session).sort("_id", ASCENDING).limit(qty)
+            accounts = [doc async for doc in cursor]
+            if len(accounts) < qty:
+                raise PurchaseError(
+                    f"Only {len(accounts)} in stock. Please lower the quantity."
+                )
+
+            total = round(float(country["price"]) * qty, 2)
             await self._change_balance(
-                c, user_id, -total, "purchase", f"{qty} x {country['name']}"
+                session, user_id, -total, "purchase", f"{qty} x {country['name']}"
             )
-            await c.execute(
-                "UPDATE users SET total_spent = total_spent + ? WHERE id = ?", (total, user_id)
+            await self.database.users.update_one(
+                {"_id": user_id}, {"$inc": {"total_spent": total}}, session=session
             )
-            order_ids = []
-            ts = now()
-            for acc_id in account_ids:
-                await c.execute(
-                    "UPDATE accounts SET status = 'sold', sold_at = ? WHERE id = ?", (ts, acc_id)
-                )
-                cur = await c.execute(
-                    "INSERT INTO orders(user_id, account_id, country_id, price, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, acc_id, country_id, country["price"], ts),
-                )
-                order_ids.append(cur.lastrowid)
 
-        placeholders = ",".join("?" * len(order_ids))
-        return await self.all(
-            f"""{ORDER_SELECT} WHERE o.id IN ({placeholders}) ORDER BY o.id""",
-            tuple(order_ids),
-        )
+            account_ids = [doc["_id"] for doc in accounts]
+            reserved = await self.database.accounts.update_many(
+                {"_id": {"$in": account_ids}, "status": "available"},
+                {"$set": {"status": "sold", "sold_at": now()}},
+                session=session,
+            )
+            if reserved.modified_count != qty:
+                raise PurchaseError("Stock changed while purchasing. Please try again.")
+
+            order_ids = []
+            for account_id in account_ids:
+                order_id = await self._next_id("orders", session)
+                await self.database.orders.insert_one({
+                    "_id": order_id,
+                    "user_id": user_id,
+                    "account_id": account_id,
+                    "country_id": country_id,
+                    "price": round(float(country["price"]), 2),
+                    "created_at": now(),
+                }, session=session)
+                order_ids.append(order_id)
+
+        return [await self.get_order(order_id) for order_id in order_ids]
 
     # --------------------------------------------------------------- orders
+    async def _order_out(self, order: dict) -> dict:
+        account = await self.database.accounts.find_one({"_id": order["account_id"]})
+        country = await self.database.countries.find_one({"_id": order["country_id"]})
+        user = await self.database.users.find_one({"_id": order["user_id"]})
+        if not account or not country or not user:
+            return self._plain(order) | {"id": order["_id"]}
+        return self._plain(order) | {
+            "id": order["_id"],
+            "phone": account["phone"],
+            "twofa": account.get("twofa"),
+            "session": self._decrypt_session(account.get("session_enc")),
+            "country_name": country["name"],
+            "country_flag": country["flag"],
+            "username": user.get("username"),
+            "first_name": user.get("first_name"),
+        }
+
     async def get_order(self, order_id: int) -> Optional[dict]:
-        return await self.one(f"{ORDER_SELECT} WHERE o.id = ?", (order_id,))
+        order = await self.database.orders.find_one({"_id": order_id})
+        return await self._order_out(order) if order else None
 
     async def user_orders(self, user_id: int, offset: int, limit: int) -> list[dict]:
-        return await self.all(
-            f"{ORDER_SELECT} WHERE o.user_id = ? ORDER BY o.id DESC LIMIT ? OFFSET ?",
-            (user_id, limit, offset),
-        )
+        cursor = self.database.orders.find({"user_id": user_id}).sort(
+            "_id", DESCENDING
+        ).skip(offset).limit(limit)
+        return [await self._order_out(order) async for order in cursor]
 
     async def count_user_orders(self, user_id: int) -> int:
-        return await self.scalar("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,))
+        return await self.database.orders.count_documents({"user_id": user_id})
 
     async def recent_orders(self, limit: int = 15) -> list[dict]:
-        return await self.all(f"{ORDER_SELECT} ORDER BY o.id DESC LIMIT ?", (limit,))
+        cursor = self.database.orders.find().sort("_id", DESCENDING).limit(limit)
+        return [await self._order_out(order) async for order in cursor]
 
     # ------------------------------------------------------------- deposits
     async def create_deposit(self, user_id: int, amount: float) -> int:
-        return await self.run(
-            "INSERT INTO deposits(user_id, amount, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (user_id, round(amount, 2), now(), now()),
-        )
+        async with self.tx() as session:
+            deposit_id = await self._next_id("deposits", session)
+            ts = now()
+            await self.database.deposits.insert_one({
+                "_id": deposit_id,
+                "user_id": user_id,
+                "amount": round(amount, 2),
+                "status": "created",
+                "admin_id": None,
+                "created_at": ts,
+                "updated_at": ts,
+            }, session=session)
+            return deposit_id
 
     async def get_deposit(self, deposit_id: int) -> Optional[dict]:
-        return await self.one("SELECT * FROM deposits WHERE id = ?", (deposit_id,))
+        doc = await self.database.deposits.find_one({"_id": deposit_id})
+        return self._plain(doc) | {"id": doc["_id"]} if doc else None
 
     async def count_pending_deposits(self, user_id: int) -> int:
-        return await self.scalar(
-            "SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'", (user_id,)
-        )
+        return await self.database.deposits.count_documents({
+            "user_id": user_id, "status": "pending"
+        })
 
     async def submit_utr(self, deposit_id: int, user_id: int, utr: str) -> str:
-        """Attach a UTR to a deposit. Returns 'ok', 'duplicate', 'expired' or 'invalid'."""
-        async with self.tx() as c:
-            async with c.execute(
-                "SELECT * FROM deposits WHERE id = ? AND user_id = ?", (deposit_id, user_id)
-            ) as cur:
-                dep = await cur.fetchone()
-            if not dep or dep["status"] != "created":
-                return "invalid"
-            if dep["created_at"] < ago(minutes=config.PAYMENT_TIMEOUT_MIN):
-                await c.execute(
-                    "UPDATE deposits SET status = 'expired', updated_at = ? WHERE id = ?",
-                    (now(), deposit_id),
+        """Attach a UTR to a deposit. Returns ok, duplicate, expired or invalid."""
+        try:
+            async with self.tx() as session:
+                dep = await self.database.deposits.find_one(
+                    {"_id": deposit_id, "user_id": user_id}, session=session
                 )
-                return "expired"
-            async with c.execute("SELECT 1 FROM deposits WHERE utr = ?", (utr,)) as cur:
-                if await cur.fetchone():
+                if not dep or dep["status"] != "created":
+                    return "invalid"
+                if dep["created_at"] < ago(minutes=config.PAYMENT_TIMEOUT_MIN):
+                    await self.database.deposits.update_one(
+                        {"_id": deposit_id},
+                        {"$set": {"status": "expired", "updated_at": now()}},
+                        session=session,
+                    )
+                    return "expired"
+                if await self.database.deposits.find_one({"utr": utr}, session=session):
                     return "duplicate"
-            await c.execute(
-                "UPDATE deposits SET utr = ?, status = 'pending', updated_at = ? WHERE id = ?",
-                (utr, now(), deposit_id),
-            )
+                await self.database.deposits.update_one(
+                    {"_id": deposit_id},
+                    {"$set": {"utr": utr, "status": "pending", "updated_at": now()}},
+                    session=session,
+                )
             return "ok"
+        except DuplicateKeyError:
+            return "duplicate"
 
     async def cancel_deposit(self, deposit_id: int, user_id: int) -> None:
-        await self.run(
-            "UPDATE deposits SET status = 'cancelled', updated_at = ? "
-            "WHERE id = ? AND user_id = ? AND status = 'created'",
-            (now(), deposit_id, user_id),
+        await self.database.deposits.update_one(
+            {"_id": deposit_id, "user_id": user_id, "status": "created"},
+            {"$set": {"status": "cancelled", "updated_at": now()}},
         )
 
     async def resolve_deposit(self, deposit_id: int, approve: bool, admin_id: int,
                               amount: Optional[float] = None) -> Optional[dict]:
-        """Approve or reject a pending deposit.
-
-        On approval the user is credited (optionally with a corrected amount)
-        and the referrer receives their commission. Returns a dict with the
-        deposit, credited amount and referral bonus, or None if the deposit
-        was not pending (e.g. another admin already handled it).
-        """
+        """Resolve a pending deposit and credit wallet/referral balance atomically."""
         ref_percent = float(await self.get_setting("ref_percent") or 0)
-        async with self.tx() as c:
-            async with c.execute("SELECT * FROM deposits WHERE id = ?", (deposit_id,)) as cur:
-                dep = await cur.fetchone()
+        async with self.tx() as session:
+            dep = await self.database.deposits.find_one(
+                {"_id": deposit_id}, session=session
+            )
             if not dep or dep["status"] != "pending":
                 return None
-            dep = dict(dep)
+            dep_out = self._plain(dep) | {"id": dep["_id"]}
+
             if not approve:
-                await c.execute(
-                    "UPDATE deposits SET status = 'rejected', admin_id = ?, updated_at = ? "
-                    "WHERE id = ?",
-                    (admin_id, now(), deposit_id),
+                await self.database.deposits.update_one(
+                    {"_id": deposit_id},
+                    {"$set": {"status": "rejected", "admin_id": admin_id, "updated_at": now()}},
+                    session=session,
                 )
-                return {"deposit": dep, "credited": 0, "ref_bonus": 0, "referrer_id": None}
+                return {
+                    "deposit": dep_out, "credited": 0, "ref_bonus": 0,
+                    "referrer_id": None,
+                }
 
             credited = round(amount if amount is not None else dep["amount"], 2)
-            await c.execute(
-                "UPDATE deposits SET status = 'approved', amount = ?, admin_id = ?, updated_at = ? "
-                "WHERE id = ?",
-                (credited, admin_id, now(), deposit_id),
+            await self.database.deposits.update_one(
+                {"_id": deposit_id},
+                {"$set": {
+                    "status": "approved", "amount": credited,
+                    "admin_id": admin_id, "updated_at": now(),
+                }},
+                session=session,
             )
-            await self._change_balance(c, dep["user_id"], credited, "deposit", f"Deposit #{deposit_id}")
-            await c.execute(
-                "UPDATE users SET total_deposit = total_deposit + ? WHERE id = ?",
-                (credited, dep["user_id"]),
+            await self._change_balance(
+                session, dep["user_id"], credited, "deposit", f"Deposit #{deposit_id}"
             )
-            async with c.execute(
-                "SELECT referrer_id FROM users WHERE id = ?", (dep["user_id"],)
-            ) as cur:
-                referrer_id = (await cur.fetchone())["referrer_id"]
+            await self.database.users.update_one(
+                {"_id": dep["user_id"]}, {"$inc": {"total_deposit": credited}},
+                session=session,
+            )
+            buyer = await self.database.users.find_one(
+                {"_id": dep["user_id"]}, {"referrer_id": 1}, session=session
+            )
+            referrer_id = buyer.get("referrer_id") if buyer else None
             bonus = 0.0
             if referrer_id and ref_percent > 0:
                 bonus = round(credited * ref_percent / 100, 2)
                 if bonus > 0:
                     await self._change_balance(
-                        c, referrer_id, bonus, "referral", f"From user {dep['user_id']}"
+                        session, referrer_id, bonus, "referral", f"From user {dep['user_id']}"
                     )
-                    await c.execute(
-                        "UPDATE users SET ref_earned = ref_earned + ? WHERE id = ?",
-                        (bonus, referrer_id),
+                    await self.database.users.update_one(
+                        {"_id": referrer_id}, {"$inc": {"ref_earned": bonus}},
+                        session=session,
                     )
-            return {"deposit": dep, "credited": credited, "ref_bonus": bonus,
-                    "referrer_id": referrer_id}
+            return {
+                "deposit": dep_out, "credited": credited, "ref_bonus": bonus,
+                "referrer_id": referrer_id,
+            }
 
     async def pending_deposits(self, limit: int = 20) -> list[dict]:
-        return await self.all(
-            "SELECT d.*, u.username, u.first_name FROM deposits d JOIN users u ON u.id = d.user_id "
-            "WHERE d.status = 'pending' ORDER BY d.id LIMIT ?",
-            (limit,),
-        )
+        cursor = self.database.deposits.find({"status": "pending"}).sort(
+            "_id", ASCENDING
+        ).limit(limit)
+        result = []
+        async for dep in cursor:
+            user = await self.database.users.find_one({"_id": dep["user_id"]})
+            result.append(self._plain(dep) | {
+                "id": dep["_id"],
+                "username": user.get("username") if user else None,
+                "first_name": user.get("first_name") if user else None,
+            })
+        return result
 
     # -------------------------------------------------------------- coupons
     async def create_coupon(self, code: str, amount: float, max_uses: int) -> bool:
         try:
-            await self.run(
-                "INSERT INTO coupons(code, amount, max_uses, created_at) VALUES (?, ?, ?, ?)",
-                (code.upper(), round(amount, 2), max_uses, now()),
-            )
+            await self.database.coupons.insert_one({
+                "_id": code.upper(),
+                "amount": round(amount, 2),
+                "max_uses": max_uses,
+                "used": 0,
+                "created_at": now(),
+            })
             return True
-        except aiosqlite.IntegrityError:
+        except DuplicateKeyError:
             return False
 
     async def coupons(self) -> list[dict]:
-        return await self.all("SELECT * FROM coupons ORDER BY created_at DESC")
+        cursor = self.database.coupons.find().sort("created_at", DESCENDING)
+        return [self._plain(doc) | {"code": doc["_id"]} async for doc in cursor]
 
     async def delete_coupon(self, code: str) -> None:
-        await self.run("DELETE FROM coupons WHERE code = ?", (code,))
+        async with self.tx() as session:
+            await self.database.coupons.delete_one({"_id": code}, session=session)
+            await self.database.coupon_uses.delete_many({"code": code}, session=session)
 
     async def redeem_coupon(self, user_id: int, code: str) -> tuple[str, float]:
-        """Returns (status, amount). status: ok | invalid | used | exhausted."""
+        """Returns (status, amount): ok, invalid, used or exhausted."""
         code = code.strip().upper()
-        async with self.tx() as c:
-            async with c.execute("SELECT * FROM coupons WHERE code = ?", (code,)) as cur:
-                coupon = await cur.fetchone()
-            if not coupon:
-                return "invalid", 0
-            if coupon["used"] >= coupon["max_uses"]:
-                return "exhausted", 0
-            async with c.execute(
-                "SELECT 1 FROM coupon_uses WHERE code = ? AND user_id = ?", (code, user_id)
-            ) as cur:
-                if await cur.fetchone():
+        try:
+            async with self.tx() as session:
+                coupon = await self.database.coupons.find_one({"_id": code}, session=session)
+                if not coupon:
+                    return "invalid", 0
+                if coupon["used"] >= coupon["max_uses"]:
+                    return "exhausted", 0
+                usage_id = f"{code}:{user_id}"
+                if await self.database.coupon_uses.find_one(
+                    {"_id": usage_id}, session=session
+                ):
                     return "used", 0
-            await c.execute("INSERT INTO coupon_uses(code, user_id) VALUES (?, ?)", (code, user_id))
-            await c.execute("UPDATE coupons SET used = used + 1 WHERE code = ?", (code,))
-            await self._change_balance(c, user_id, coupon["amount"], "coupon", f"Code {code}")
-            return "ok", coupon["amount"]
+                await self.database.coupon_uses.insert_one({
+                    "_id": usage_id, "code": code, "user_id": user_id
+                }, session=session)
+                await self.database.coupons.update_one(
+                    {"_id": code}, {"$inc": {"used": 1}}, session=session
+                )
+                await self._change_balance(
+                    session, user_id, coupon["amount"], "coupon", f"Code {code}"
+                )
+                return "ok", coupon["amount"]
+        except DuplicateKeyError:
+            return "used", 0
 
     # ---------------------------------------------------------------- stats
+    async def _revenue(self, since: Optional[str]) -> tuple[float, int]:
+        match = {"created_at": {"$gte": since}} if since else {}
+        rows = await self.database.orders.aggregate([
+            {"$match": match},
+            {"$group": {"_id": None, "total": {"$sum": "$price"}, "count": {"$sum": 1}}},
+        ]).to_list(length=1)
+        if not rows:
+            return 0.0, 0
+        return float(rows[0]["total"]), int(rows[0]["count"])
+
     async def stats(self) -> dict:
         today = local_midnight_utc()
         week = ago(days=7)
-
-        async def revenue(since: Optional[str]) -> tuple[float, int]:
-            if since:
-                row = await self.one(
-                    "SELECT COALESCE(SUM(price),0) s, COUNT(*) n FROM orders WHERE created_at >= ?",
-                    (since,),
-                )
-            else:
-                row = await self.one("SELECT COALESCE(SUM(price),0) s, COUNT(*) n FROM orders")
-            return row["s"], row["n"]
-
+        users_today = await self.database.users.count_documents({"joined_at": {"$gte": today}})
+        deposits = await self.database.deposits.aggregate([
+            {"$match": {"status": "approved"}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(length=1)
+        balances = await self.database.users.aggregate([
+            {"$group": {"_id": None, "total": {"$sum": "$balance"}}},
+        ]).to_list(length=1)
         return {
-            "users": await self.scalar("SELECT COUNT(*) FROM users"),
-            "users_today": await self.scalar(
-                "SELECT COUNT(*) FROM users WHERE joined_at >= ?", (today,)
-            ),
-            "stock": await self.scalar("SELECT COUNT(*) FROM accounts WHERE status = 'available'"),
-            "sold": await self.scalar("SELECT COUNT(*) FROM accounts WHERE status = 'sold'"),
-            "today": await revenue(today),
-            "week": await revenue(week),
-            "all": await revenue(None),
-            "deposits": await self.scalar(
-                "SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status = 'approved'"
-            ),
-            "pending": await self.scalar("SELECT COUNT(*) FROM deposits WHERE status = 'pending'"),
-            "balances": await self.scalar("SELECT COALESCE(SUM(balance),0) FROM users"),
+            "users": await self.database.users.count_documents({}),
+            "users_today": users_today,
+            "stock": await self.database.accounts.count_documents({"status": "available"}),
+            "sold": await self.database.accounts.count_documents({"status": "sold"}),
+            "today": await self._revenue(today),
+            "week": await self._revenue(week),
+            "all": await self._revenue(None),
+            "deposits": float(deposits[0]["total"]) if deposits else 0.0,
+            "pending": await self.database.deposits.count_documents({"status": "pending"}),
+            "balances": float(balances[0]["total"]) if balances else 0.0,
         }
 
+    # ---------------------------------------------------------------- backup
     async def backup(self, target: str) -> None:
-        async with self._lock:
-            async with aiosqlite.connect(target) as dst:
-                await self.conn.backup(dst)
+        """Write a JSON snapshot of every application collection to target."""
+        names = await self.database.list_collection_names()
+        snapshot = {}
+        for name in names:
+            snapshot[name] = [
+                doc async for doc in self.database[name].find({})
+            ]
+        payload = json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+        await asyncio.to_thread(Path(target).write_text, payload, encoding="utf-8")
 
 
-ORDER_SELECT = """
-SELECT o.*, a.phone, a.twofa, a.session, c.name AS country_name, c.flag AS country_flag,
-       u.username, u.first_name
-FROM orders o
-JOIN accounts a  ON a.id = o.account_id
-JOIN countries c ON c.id = o.country_id
-JOIN users u     ON u.id = o.user_id
-"""
-
-db = Database(config.DATABASE_PATH)
+db = Database(config.MONGODB_URI, config.MONGODB_DATABASE)
