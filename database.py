@@ -205,7 +205,8 @@ class Database:
             return True
 
     async def get_user(self, user_id: int) -> Optional[dict]:
-        return self._plain(await self.database.users.find_one({"_id": user_id}))
+        doc = await self.database.users.find_one({"_id": user_id})
+        return self._plain(doc) | {"id": doc["_id"]} if doc else None
 
     async def find_user(self, query: str) -> Optional[dict]:
         query = query.strip().lstrip("@")
@@ -214,7 +215,7 @@ class Database:
         user = await self.database.users.find_one({
             "username": {"$regex": f"^{__import__('re').escape(query)}$", "$options": "i"}
         })
-        return self._plain(user)
+        return self._plain(user) | {"id": user["_id"]} if user else None
 
     async def set_banned(self, user_id: int, banned: bool) -> None:
         await self.database.users.update_one(
