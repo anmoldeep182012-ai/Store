@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+from bson import json_util
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from pymongo import AsyncMongoClient
@@ -675,7 +676,7 @@ class Database:
             snapshot[name] = [
                 doc async for doc in self.database[name].find({})
             ]
-        payload = json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+        payload = json_util.dumps(snapshot, ensure_ascii=False, indent=2)
         await asyncio.to_thread(Path(target).write_text, payload, encoding="utf-8")
 
 
