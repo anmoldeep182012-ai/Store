@@ -23,6 +23,11 @@ from ui.theme import (
     back, back_home, blue, btn, card, e, green, kb, local_time, money, pager, red, row,
     stock_bar,
 )
+from services.session_generator import (
+    cleanup_pending_session,
+    finish_session_login,
+    start_session_login,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +45,90 @@ SETTINGS = {
     "otp_hours": ("⏱ OTP window (hours)", "number"),
 }
 
+
+# ======================================================== session generator
+async def gsession_cmd(update: Update, context: Ctx) -> None:
+    admin_id = update.effective_user.id
+    if not is_admin(admin_id):
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            card(
+                "🔑 Generate StringSession",
+                "Usage: <code>/gsession &lt;Number&gt; [2FA]</code>",
+                "Example: <code>/gsession +919876543210 My2FAPass</code>",
+                footer="2FA is optional if the account has no cloud password.",
+            )
+        )
+        return
+
+    raw_phone = args[0].replace(" ", "").replace("-", "")
+    if not PHONE_RE.match(raw_phone):
+        await update.message.reply_text("❌ Invalid phone number format. Example: <code>+919876543210</code>")
+        return
+
+    twofa = " ".join(args[1:]).strip() or None
+    wait_msg = await update.message.reply_text("⏳ Sending OTP request to Telegram…")
+
+    try:
+        await start_session_login(admin_id, raw_phone, twofa)
+    except Exception as exc:
+        await wait_msg.edit_text(f"❌ {e(exc)}")
+        return
+
+    set_state(context, "gsession_otp")
+    await wait_msg.edit_text(
+        card(
+            "📩 OTP Sent",
+            f"▸ Phone: <code>{e(raw_phone if raw_phone.startswith('+') else '+' + raw_phone)}</code>",
+            f"▸ 2FA: <code>{e(twofa) if twofa else 'None'}</code>",
+            "",
+            "Send the <b>OTP code</b> now (use spaces like <code>1 2 3 4 5</code> so Telegram doesn't expire it).",
+        ),
+        reply_markup=kb([red("✖ Cancel", "adm:gcancel")]),
+    )
+
+
+@on_input("gsession_otp", admin=True)
+async def gsession_otp_input(update: Update, context: Ctx, state: dict) -> None:
+    admin_id = update.effective_user.id
+    otp = update.message.text.strip()
+    wait_msg = await update.message.reply_text("⏳ Verifying OTP…")
+
+    try:
+        phone, session_str, twofa = await finish_session_login(admin_id, otp)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Invalid OTP code" in msg:
+            await wait_msg.edit_text(
+                f"❌ {e(msg)}",
+                reply_markup=kb([red("✖ Cancel", "adm:gcancel")]),
+            )
+            return
+        clear_state(context)
+        await wait_msg.edit_text(f"❌ {msg}")
+        return
+    except Exception as exc:
+        clear_state(context)
+        await wait_msg.edit_text(f"❌ {e(exc)}")
+        return
+
+    clear_state(context)
+    stock_line = f"{phone} | {twofa or '-'} | {session_str}"
+    await wait_msg.edit_text(
+        card(
+            "✅ Session Generated",
+            f"▸ Phone: <code>{e(phone)}</code>",
+            "",
+            "<b>🔑 StringSession:</b>",
+            f"<code>{e(session_str)}</code>",
+            "",
+            "<b>📦 Ready-to-paste Stock Line:</b>",
+            f"<code>{e(stock_line)}</code>",
+        )
+    )
 
 # ============================================================ dashboard
 async def dashboard(update: Update, context: Ctx) -> None:
@@ -602,4 +691,5 @@ async def admin_cb(update: Update, context: Ctx) -> None:
 
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("gsession", gsession_cmd))
     app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^adm(:.*)?$"))
