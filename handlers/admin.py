@@ -446,12 +446,12 @@ async def setting_input(update: Update, context: Ctx, state: dict) -> None:
 async def send_backup(update: Update, context: Ctx) -> None:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, f"store-backup-{stamp}.db")
+        path = os.path.join(tmp, f"store-backup-{stamp}.json")
         await db.backup(path)
         with open(path, "rb") as fh:
             await update.effective_chat.send_document(
                 InputFile(fh, filename=os.path.basename(path)),
-                caption="💾 Database backup. Keep it private: it contains account details.")
+                caption="💾 MongoDB backup (JSON). Keep it private: it contains customer and inventory data.")
 
 
 # =============================================================== router
