@@ -586,7 +586,8 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
         "🖥 Server 2 Sale",
         f"▸ Buyer: {user_link(user_id, update.effective_user.username, update.effective_user.first_name)}",
         row("Country", e(purchased["name"])),
-        row("Provider price", f"USD {purchased['price_usd']:.4f}"),
+        row("Provider cost", money(actual_provider_cost)),
+        row("Owner commission", money(actual_commission)),
         row("Customer price", money(actual_price)),
         row("Order", f"#{order_id}"),
     ))
