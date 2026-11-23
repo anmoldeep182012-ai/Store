@@ -576,10 +576,10 @@ async def server2_screen(update: Update, context: Ctx) -> None:
 async def server2_markup_input(update: Update, context: Ctx, state: dict) -> None:
     try:
         value = float(update.message.text.strip())
-        if value < 0:
+        if value < 0 or value > 500:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Send a non-negative percentage.")
+        await update.message.reply_text("❌ Send a commission between 0 and 500%.")
         return
     clear_state(context)
     await db.set_setting("server2_markup", str(round(value, 2)))
@@ -683,7 +683,8 @@ async def admin_cb(update: Update, context: Ctx) -> None:
     args = parts[2:]
     clear_state(context)
 
-    if action in ("adel", "cdelok", "cpx", "maint", "ctog", "uban", "bcgo", "backup"):
+    if action in ("adel", "cdelok", "cpx", "maint", "ctog", "uban", "bcgo", "backup",
+                  "s2markupset", "s2rateset"):
         pass  # these answer the query themselves below
     else:
         await query.answer()
