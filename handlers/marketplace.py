@@ -164,6 +164,7 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
         return
 
     if method == "invite":
+        invite_link = None
         try:
             invite = await context.bot.create_chat_invite_link(
                 chat_id=listing["chat_id"],
@@ -171,9 +172,15 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
                 expire_date=datetime.now(timezone.utc) + timedelta(hours=24),
                 creates_join_request=True,
             )
+            invite_link = invite.invite_link
             if not await db.set_marketplace_invite_link(order["id"], invite.invite_link):
                 raise RuntimeError("Could not save the buyer's invite link.")
         except Exception:
+            if invite_link:
+                try:
+                    await context.bot.revoke_chat_invite_link(listing["chat_id"], invite_link)
+                except Exception:
+                    pass
             await db.refund_marketplace_order(
                 order["id"], buyer_id, "The bot could not create a secure invite link."
             )
