@@ -40,6 +40,7 @@ async def home_screen(update: Update, context: Ctx) -> None:
     )
     rows = [
         [blue("🛒  Buy Accounts", "shop:0")],
+        [blue("📢 Channels & Groups", "market:home")],
         [green("💳 Deposit", "dep"), btn("👛 Wallet", "wallet")],
         [btn("📦 My Orders", "orders:0"), btn("🎁 Refer & Earn", "ref")],
         [btn("🎟 Redeem Code", "redeem"), btn("🆘 Help", "help")],
@@ -73,12 +74,10 @@ async def shop_cb(update: Update, context: Ctx) -> None:
         "",
         row("🖥 Server 1", f"{len(countries)} countries • {total_stock} accounts"),
         row("🖥 Server 2", "TG-Lion provider stock"),
-        row("📢 Marketplace", "Verified channels & groups"),
-        footer="Server 1, Server 2 and Marketplace inventories are separate.",
+        footer="Server 1 and Server 2 inventories are separate.",
     ), kb(
         [blue("📦 Server 1 [Owner Stock]", "shop1:0")],
         [blue("🔎 Search Server 2 [Stable Acc]", "s2search")],
-        [blue("📢 Channels & Groups", "market:home")],
         back("home"),
     ))
 
