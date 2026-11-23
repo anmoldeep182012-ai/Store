@@ -9,7 +9,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from core import Ctx, clear_state, is_admin, log_event, on_input, set_state, show, user_link
 from database import PurchaseError, db
-from services import otp
+from services import otp, provider
 from ui.theme import (
     back, back_home, blue, btn, card, copy_btn, e, green, kb, local_time, money, pager, red, row,
     stock_bar, stock_label, url_btn,
@@ -40,6 +40,7 @@ async def home_screen(update: Update, context: Ctx) -> None:
     )
     rows = [
         [blue("🛒  Buy Accounts", "shop:0")],
+        [blue("🔎 Search Server 2 [Stable Acc]", "s2search")],
         [green("💳 Deposit", "dep"), btn("👛 Wallet", "wallet")],
         [btn("📦 My Orders", "orders:0"), btn("🎁 Refer & Earn", "ref")],
         [btn("🎟 Redeem Code", "redeem"), btn("🆘 Help", "help")],
@@ -97,7 +98,8 @@ async def shop_cb(update: Update, context: Ctx) -> None:
         "Tap a country to see price and stock.",
         footer="✖ = out of stock",
     )
-    await show(update, text, kb(*buttons, pager("shop", page, pages), back()))
+    await show(update, text, kb(*buttons, pager("shop", page, pages),
+                                [blue("🔎 Search Server 2 [Stable Acc]", "s2search")], back()))
 
 
 async def country_cb(update: Update, context: Ctx) -> None:
@@ -237,6 +239,301 @@ def delivery_keyboard(order: dict, back_label: str = "📦 My Orders"):
     )
 
 
+# -------------------------------------------------------------- server 2
+async def server2_search_cb(update: Update, context: Ctx) -> None:
+    await update.callback_query.answer()
+    if not provider.configured():
+        await show(update, card(
+            "🔎 Server 2",
+            "Server 2 is not configured yet.",
+            "Please contact the store administrator.",
+        ), kb(back()))
+        return
+    set_state(context, "server2_search")
+    await show(update, card(
+        "🔎 Search Server 2 [Stable Acc]",
+        "Send a country name, code, or a few letters.",
+        "",
+        "Examples: <code>India</code>, <code>in</code>, <code>uni</code>",
+        footer="Server 2 contains provider accounts only. Server 1 stock is separate.",
+    ), kb([red("✖ Cancel", "shop:0")]))
+
+
+@on_input("server2_search")
+async def server2_search_input(update: Update, context: Ctx, state: dict) -> None:
+    query = (update.message.text or "").strip().casefold()
+    if not query:
+        await update.message.reply_text("❌ Send a country name, code, or a few letters.")
+        return
+    try:
+        countries = await provider.available_countries()
+    except provider.ProviderError as exc:
+        clear_state(context)
+        await update.message.reply_text(f"⚠️ {e(exc)}", reply_markup=kb(back()))
+        return
+
+    matches = [
+        c for c in countries
+        if query in c["name"].casefold() or query in c["code"].casefold()
+    ]
+    if not matches:
+        clear_state(context)
+        await update.message.reply_text(
+            f"❌ No Server 2 country matched <b>{e(update.message.text)}</b>.",
+            reply_markup=kb([blue("🔎 Search Again", "s2search"), btn("🏠 Home", "home")]),
+        )
+        return
+
+    clear_state(context)
+    matches = sorted(matches, key=lambda item: (item["qty"] == 0, item["name"].casefold()))
+    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
+    if usd_inr <= 0:
+        await update.message.reply_text("⚠️ Server 2 INR conversion rate is not configured.")
+        return
+
+    rows = []
+    for country in matches[:20]:
+        selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        stock = "✖" if country["qty"] <= 0 else f"📦 {country['qty']}"
+        rows.append([btn(
+            f"{country['name']} • {money(selling)} • {stock}",
+            f"s2:{country['code']}",
+            style="primary" if country["qty"] > 0 else None,
+        )])
+
+    text = card(
+        "🔎 Server 2 [Stable Acc]",
+        row("🔍 Search", e(update.message.text)),
+        row("🌍 Matches", str(len(matches))),
+        "",
+        "Select a country to buy from Server 2.",
+        footer=f"Markup: {markup_percent:g}% • USD/INR: {usd_inr:g}",
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=kb(*rows, [btn("🔎 Search Again", "s2search")], [btn("🏠 Home", "home")]),
+    )
+
+
+async def server2_country_cb(update: Update, context: Ctx) -> None:
+    query = update.callback_query
+    code = query.data.split(":")[1].upper()
+    try:
+        countries = await provider.available_countries()
+    except provider.ProviderError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+
+    country = next((c for c in countries if c["code"] == code), None)
+    if not country:
+        await query.answer("Country is no longer available.", show_alert=True)
+        return
+    if country["qty"] <= 0:
+        await query.answer("Server 2 is out of stock for this country.", show_alert=True)
+        return
+
+    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
+    if usd_inr <= 0:
+        await query.answer("Server 2 INR rate is not configured.", show_alert=True)
+        return
+
+    selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+    user = await db.get_user(update.effective_user.id)
+    await query.answer()
+
+    text = card(
+        f"🌍 {e(country['name'])}",
+        row("🖥 Server", "Server 2 • Stable Acc"),
+        row("💵 Provider price", f"USD {country['price_usd']:.4f}"),
+        row("📈 Commission", f"{markup_percent:g}%"),
+        row("💰 Your price", money(selling)),
+        row("📦 Stock", str(country["qty"])),
+        row("💳 Your balance", money(user["balance"])),
+        "",
+        "Server 2 accounts come directly from the configured provider.",
+    )
+    rows = []
+    if user["balance"] >= selling:
+        rows.append([green(f"⚡ Buy Now • {money(selling)}", f"s2buy:{code}")])
+    else:
+        rows.append([blue(f"💳 Add {money(selling - user['balance'])}", "dep")])
+    rows.append([btn("🔎 Search Again", "s2search"), btn("🏠 Home", "home")])
+    await show(update, text, kb(*rows))
+
+
+async def server2_buy_cb(update: Update, context: Ctx) -> None:
+    query = update.callback_query
+    code = query.data.split(":")[1].upper()
+    user_id = update.effective_user.id
+    reserved = 0.0
+
+    try:
+        countries = await provider.available_countries()
+        country = next((c for c in countries if c["code"] == code), None)
+        if not country or country["qty"] <= 0:
+            await query.answer("Country is out of stock.", show_alert=True)
+            return
+
+        markup_percent = float(await db.get_setting("server2_markup") or 0)
+        usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
+        if usd_inr <= 0:
+            raise provider.ProviderError("Server 2 INR conversion rate is not configured.")
+
+        estimated = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        user = await db.get_user(user_id)
+        if user["balance"] < estimated:
+            await query.answer("Insufficient wallet balance.", show_alert=True)
+            return
+
+        reserved = estimated
+        await db.reserve_server2_balance(
+            user_id, estimated, f"Server 2 {country['name']}"
+        )
+
+        try:
+            purchased = await provider.buy_number(code, country["price_usd"])
+        except Exception:
+            await db.refund_server2_balance(user_id, estimated, "Server 2 purchase failed")
+            reserved = 0.0
+            raise
+
+        actual_price = round(
+            purchased["price_usd"] * usd_inr * (1 + markup_percent / 100), 2
+        )
+        if actual_price > estimated:
+            await db.refund_server2_balance(user_id, estimated, "Server 2 price mismatch")
+            reserved = 0.0
+            await query.answer("Provider price changed. Please try again.", show_alert=True)
+            return
+
+        if estimated > actual_price:
+            await db.refund_server2_balance(user_id, estimated - actual_price, "Server 2 price adjustment")
+
+        order_id = await db.create_server2_order(
+            user_id=user_id,
+            country_code=code,
+            country_name=purchased["name"],
+            provider_price_usd=purchased["price_usd"],
+            price=actual_price,
+            number=purchased["number"],
+        )
+        reserved = 0.0
+    except provider.ProviderError as exc:
+        if reserved:
+            await db.refund_server2_balance(user_id, reserved, "Server 2 purchase failed")
+        await query.answer(str(exc), show_alert=True)
+        return
+    except Exception:
+        if reserved:
+            await db.refund_server2_balance(user_id, reserved, "Server 2 purchase failed")
+        await query.answer("⚠️ Server 2 purchase failed. Your reserved balance was refunded.", show_alert=True)
+        return
+
+    await query.answer("✅ Server 2 account purchased!")
+    await show(update, server2_delivery_text({
+        "id": order_id,
+        "country_name": purchased["name"],
+        "country_code": code,
+        "number": purchased["number"],
+        "price": actual_price,
+        "code": None,
+        "password": None,
+    }), server2_delivery_keyboard(order_id))
+    await log_event(context, card(
+        "🖥 Server 2 Sale",
+        f"▸ Buyer: {user_link(user_id, update.effective_user.username, update.effective_user.first_name)}",
+        row("Country", e(purchased["name"])),
+        row("Provider price", f"USD {purchased['price_usd']:.4f}"),
+        row("Customer price", money(actual_price)),
+        row("Order", f"#{order_id}"),
+    ))
+
+
+def server2_delivery_text(order: dict) -> str:
+    return card(
+        f"🎉 Server 2 Order #{order['id']}",
+        row("🖥 Server", "Server 2 • Stable Acc"),
+        row("🌍 Country", e(order["country_name"])),
+        f"▸ 📱 Phone: <code>{e(order['number'])}</code>",
+        f"▸ 📲 OTP: <code>{e(order.get('code') or 'Tap Get OTP')}</code>",
+        f"▸ 🔐 Password: <code>{e(order.get('password') or 'Tap Get OTP')}</code>",
+        row("💵 Paid", money(order["price"])),
+        "",
+        "Use <b>📲 Get OTP</b> below when Telegram asks for the login code.",
+        footer="Server 2 provider stock is separate from owner-added Server 1 stock.",
+    )
+
+
+def server2_delivery_keyboard(order_id: int):
+    return kb(
+        [btn("📋 Copy Phone", "noop")],
+        [blue("📲 Get OTP", f"s2otp:{order_id}")],
+        [btn("📦 Server 2 Orders", "s2orders:0"), btn("🏠 Home", "home")],
+    )
+
+
+async def server2_otp_cb(update: Update, context: Ctx) -> None:
+    query = update.callback_query
+    order = await db.get_server2_order(int(query.data.split(":")[1]))
+    if not order or order["user_id"] != update.effective_user.id:
+        await query.answer("Order not found.", show_alert=True)
+        return
+
+    if order.get("code") and order.get("password"):
+        await query.answer("OTP already fetched.", show_alert=True)
+        await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+        return
+
+    await query.answer("⏳ Requesting code…")
+    try:
+        credentials = await provider.get_code(order["number"])
+    except provider.ProviderError as exc:
+        await query.message.reply_text(
+            f"⌛ {e(exc)}
+
+If you just requested the Telegram login code, wait a few seconds and tap <b>📲 Get OTP</b> again."
+        )
+        return
+
+    order = await db.update_server2_credentials(
+        order["id"], credentials["code"], credentials["pass"]
+    )
+    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+
+
+async def server2_orders_cb(update: Update, context: Ctx) -> None:
+    await update.callback_query.answer()
+    user_id = update.effective_user.id
+    page = int(update.callback_query.data.split(":")[1])
+    total = await db.count_server2_orders(user_id)
+    if not total:
+        await show(update, card("📦 Server 2 Orders", "You haven't bought a Server 2 account yet."),
+                   kb([blue("🔎 Search Server 2", "s2search"), btn("🏠 Home", "home")]))
+        return
+    pages = math.ceil(total / ORDERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    orders = await db.server2_orders(user_id, page * ORDERS_PER_PAGE, ORDERS_PER_PAGE)
+    rows = [[btn(
+        f"#{o['id']} • {e(o['country_code'])} • {money(o['price'])}",
+        f"s2o:{o['id']}"
+    )] for o in orders]
+    await show(update, card("📦 Server 2 Orders", row("Total orders", str(total)),
+                            "", "Tap an order to view it."),
+               kb(*rows, pager("s2orders", page, pages),
+                  [btn("🔎 Search Server 2", "s2search")], back()))
+
+
+async def server2_order_cb(update: Update, context: Ctx) -> None:
+    order = await db.get_server2_order(int(update.callback_query.data.split(":")[1]))
+    if not order or order["user_id"] != update.effective_user.id:
+        await update.callback_query.answer("Order not found.", show_alert=True)
+        return
+    await update.callback_query.answer()
+    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+
+
 # --------------------------------------------------------------- orders
 async def orders_cb(update: Update, context: Ctx) -> None:
     query = update.callback_query
@@ -255,7 +552,7 @@ async def orders_cb(update: Update, context: Ctx) -> None:
                     f"o:{o['id']}")] for o in orders]
     text = card("📦 My Orders", row("Total orders", str(total)), "",
                 "Tap an order to view its details.")
-    await show(update, text, kb(*buttons, pager("orders", page, pages), back()))
+    await show(update, text, kb(*buttons, pager("orders", page, pages), [btn("🖥 Server 2 Orders", "s2orders:0")], back()))
 
 
 async def order_cb(update: Update, context: Ctx) -> None:
@@ -434,6 +731,12 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(home_cb, pattern=r"^home$"))
     app.add_handler(CallbackQueryHandler(noop_cb, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(shop_cb, pattern=r"^shop:-?\d+$"))
+    app.add_handler(CallbackQueryHandler(server2_search_cb, pattern=r"^s2search$"))
+    app.add_handler(CallbackQueryHandler(server2_country_cb, pattern=r"^s2:[A-Z]+$"))
+    app.add_handler(CallbackQueryHandler(server2_buy_cb, pattern=r"^s2buy:[A-Z]+$"))
+    app.add_handler(CallbackQueryHandler(server2_otp_cb, pattern=r"^s2otp:\d+$"))
+    app.add_handler(CallbackQueryHandler(server2_orders_cb, pattern=r"^s2orders:-?\d+$"))
+    app.add_handler(CallbackQueryHandler(server2_order_cb, pattern=r"^s2o:\d+$"))
     app.add_handler(CallbackQueryHandler(country_cb, pattern=r"^c:\d+:-?\d+$"))
     app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^cf:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:\d+:\d+$"))
