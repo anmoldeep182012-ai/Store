@@ -546,7 +546,7 @@ class Database:
             document = {
                 "_id": listing_id,
                 "type": data["type"],
-                "title": data["title"],
+                "title": data.get("title") or data["chat_title"],
                 "username": data.get("username"),
                 "chat_id": int(data["chat_id"]),
                 "chat_title": data["chat_title"],
