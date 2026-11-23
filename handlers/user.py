@@ -77,7 +77,7 @@ async def shop_cb(update: Update, context: Ctx) -> None:
         footer="Server 1 and Server 2 inventories are separate.",
     ), kb(
         [blue("📦 Server 1 [Owner Stock]", "shop1:0")],
-        [blue("🔎 Search Server 2 [Stable Acc]", "s2search")],
+        [blue("🔎 Server 2 [Stable Acc]", "s2list:0")],
         back("home"),
     ))
 
@@ -258,6 +258,75 @@ def delivery_keyboard(order: dict, back_label: str = "📦 My Orders"):
 
 
 # -------------------------------------------------------------- server 2
+SERVER2_COUNTRIES_PER_PAGE = 12
+
+
+async def server2_list_cb(update: Update, context: Ctx) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = max(0, int(query.data.split(":")[1]))
+    if not provider.configured():
+        await show(update, card(
+            "🖥 Server 2 [Stable Acc]",
+            "Server 2 is not configured yet.",
+            "Please contact the store administrator.",
+        ), kb(back("shop:0")))
+        return
+
+    try:
+        countries = await provider.available_countries()
+    except provider.ProviderError as exc:
+        await show(update, card("⚠️ Server 2 unavailable", e(exc)), kb(back("shop:0")))
+        return
+
+    countries = sorted(countries, key=lambda item: (item["qty"] <= 0, item["name"].casefold()))
+    total = len(countries)
+    pages = max(1, (total + SERVER2_COUNTRIES_PER_PAGE - 1) // SERVER2_COUNTRIES_PER_PAGE)
+    page = min(page, pages - 1)
+    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
+    if usd_inr <= 0:
+        await show(update, card(
+            "⚠️ Server 2",
+            "The USD → INR conversion rate has not been configured yet.",
+        ), kb(back("shop:0")))
+        return
+
+    chunk = countries[page * SERVER2_COUNTRIES_PER_PAGE:(page + 1) * SERVER2_COUNTRIES_PER_PAGE]
+    rows, pair = [], []
+    for country in chunk:
+        selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        stock_mark = "📦" if country["qty"] > 0 else "✖"
+        pair.append(btn(
+            f"{country['name']} • {money(selling)} {stock_mark}",
+            f"s2:{country['code']}",
+            style="primary" if country["qty"] > 0 else None,
+        ))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+
+    text = card(
+        "🖥 Server 2 [Stable Acc]",
+        "Select a country to buy:",
+        row("🌍 Countries", str(total)),
+        row("📄 Page", f"{page + 1}/{pages}"),
+        footer=f"Markup: {markup_percent:g}% • USD/INR: {usd_inr:g}",
+    )
+    navigation = []
+    if page < pages - 1:
+        navigation.append(btn("» Next", f"s2list:{page + 1}", style="primary"))
+    if page > 0:
+        navigation.append(btn("« Back", f"s2list:{page - 1}"))
+    else:
+        navigation.append(btn("← Back", "shop:0"))
+    rows.append([green("⌕ Search Country", "s2search")])
+    rows.append(navigation)
+    await show(update, text, kb(*rows))
+
+
 async def server2_search_cb(update: Update, context: Ctx) -> None:
     await update.callback_query.answer()
     if not provider.configured():
@@ -795,6 +864,7 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(shop_cb, pattern=r"^shop:0$"))
     app.add_handler(CallbackQueryHandler(server1_shop_cb, pattern=r"^shop1:-?\d+$"))
     app.add_handler(CallbackQueryHandler(server2_search_cb, pattern=r"^s2search$"))
+    app.add_handler(CallbackQueryHandler(server2_list_cb, pattern=r"^s2list:\d+$"))
     app.add_handler(CallbackQueryHandler(server2_country_cb, pattern=r"^s2:[A-Z]+$"))
     app.add_handler(CallbackQueryHandler(server2_buy_cb, pattern=r"^s2buy:[A-Z]+$"))
     app.add_handler(CallbackQueryHandler(server2_otp_cb, pattern=r"^s2otp:\d+$"))
