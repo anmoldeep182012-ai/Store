@@ -259,6 +259,45 @@ async def server2_search_cb(update: Update, context: Ctx) -> None:
     ), kb([red("✖ Cancel", "shop:0")]))
 
 
+def _server2_country_matches(countries: list[dict], query: str) -> list[dict]:
+    """Match codes and names, treating UK as an alias for United Kingdom."""
+    query = " ".join(query.casefold().split())
+    if not query:
+        return []
+
+    # UK means United Kingdom (GB), not Ukraine (UA).
+    if query in {"uk", "gb", "britain", "great britain", "united kingdom"}:
+        return [
+            country for country in countries
+            if country["code"].upper() in {"GB", "UK"}
+            or country["name"].casefold().startswith("united kingdom")
+        ]
+
+    # Exact ISO/provider code wins before any partial-name match.
+    exact_code = [
+        country for country in countries
+        if country["code"].casefold() == query
+    ]
+    if exact_code:
+        return exact_code
+
+    exact_name = [
+        country for country in countries
+        if country["name"].casefold().strip() == query
+    ]
+    if exact_name:
+        return exact_name
+
+    # Short prefixes such as "uni" can match United Kingdom/States/etc.
+    # Longer fragments can match anywhere in a country name.
+    return [
+        country for country in countries
+        if country["name"].casefold().startswith(query)
+        or country["code"].casefold().startswith(query)
+        or (len(query) >= 4 and query in country["name"].casefold())
+    ]
+
+
 @on_input("server2_search")
 async def server2_search_input(update: Update, context: Ctx, state: dict) -> None:
     query = (update.message.text or "").strip().casefold()
@@ -272,10 +311,7 @@ async def server2_search_input(update: Update, context: Ctx, state: dict) -> Non
         await update.message.reply_text(f"⚠️ {e(exc)}", reply_markup=kb(back()))
         return
 
-    matches = [
-        c for c in countries
-        if query in c["name"].casefold() or query in c["code"].casefold()
-    ]
+    matches = _server2_country_matches(countries, query)
     if not matches:
         clear_state(context)
         await update.message.reply_text(
