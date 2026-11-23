@@ -306,7 +306,7 @@ async def market_admin_cb(update: Update, context: Ctx) -> None:
     elif action == "view":
         listing = await db.get_marketplace_listing(int(args[0]))
         if not listing:
-            await query.answer("Listing not found.", show_alert=True)
+            await query.message.reply_text("⚠️ Listing not found.")
             return
         await show(update, card(
             f"📋 Listing #{listing['id']}",
@@ -318,13 +318,22 @@ async def market_admin_cb(update: Update, context: Ctx) -> None:
             row("Status", listing["status"]),
             row("Verified", str(listing["verified"])),
         ), kb(
+            [btn("💵 Change Price", f"mktadm:price:{listing['id']}")],
             [red("🙈 Hide Listing", f"mktadm:hide:{listing['id']}"),
              red("🗑 Delete Listing", f"mktadm:delete:{listing['id']}")],
             back("mktadm:list"),
         ))
+    elif action == "price":
+        listing_id = int(args[0])
+        set_state(context, "marketplace_editprice", listing_id=listing_id)
+        await show(update, card(
+            "💵 Change Listing Price",
+            f"Send the new price in INR for listing <b>#{listing_id}</b>."
+        ), kb([red("✖ Cancel", f"mktadm:view:{listing_id}")]))
     elif action == "hide":
-        await db.hide_marketplace_listing(int(args[0]), update.effective_user.id)
-        await show(update, card("✅ Listing hidden."), kb(back("mktadm:list")))
+        changed = await db.hide_marketplace_listing(int(args[0]), update.effective_user.id)
+        await show(update, card("✅ Listing hidden." if changed else "⚠️ Listing could not be hidden."),
+                   kb(back("mktadm:list")))
     elif action == "delete":
         await db.delete_marketplace_listing(int(args[0]), update.effective_user.id)
         await show(update, card("✅ Listing archived."), kb(back("mktadm:list")))
@@ -340,7 +349,7 @@ async def market_admin_cb(update: Update, context: Ctx) -> None:
     elif action == "ord":
         order = await db.get_marketplace_order(int(args[0]))
         if not order:
-            await query.answer("Order not found.", show_alert=True)
+            await query.message.reply_text("⚠️ Order not found.")
             return
         rows = []
         if order["status"] in ("awaiting_transfer", "awaiting_join"):
@@ -358,13 +367,40 @@ async def market_admin_cb(update: Update, context: Ctx) -> None:
             int(args[0]), update.effective_user.id, "Refunded by store admin"
         )
         if not order:
-            await query.answer("Order already completed or refunded.", show_alert=True)
+            await query.message.reply_text("⚠️ Order already completed or refunded.")
             return
+        if order.get("invite_link"):
+            try:
+                await context.bot.revoke_chat_invite_link(order["chat_id"], order["invite_link"])
+            except Exception:
+                pass
         await send(context, order["buyer_id"], card(
             f"↩️ Marketplace Order #{order['id']} Refunded",
             f"{money(order['price'])} was returned to your wallet.",
         ))
         await show(update, card(f"✅ Order #{order['id']} refunded."), kb(back("mktadm:orders")))
+
+
+@on_input("marketplace_editprice", admin=True)
+async def marketplace_editprice_input(update: Update, context: Ctx, state: dict) -> None:
+    try:
+        price = round(float(update.message.text.replace(",", "").strip()), 2)
+        if price <= 0 or price > 10000000:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Send a valid price greater than zero.")
+        return
+    changed = await db.update_marketplace_price(
+        int(state["listing_id"]), price, update.effective_user.id
+    )
+    clear_state(context)
+    if not changed:
+        await update.message.reply_text("⚠️ Listing is no longer editable.")
+        return
+    await update.message.reply_text(
+        f"✅ Marketplace listing price updated to <b>{money(price)}</b>.",
+        reply_markup=kb([btn("⚙️ Marketplace Manager", "mktadm")]),
+    )
 
 
 @on_input("marketplace_chat", admin=True)
