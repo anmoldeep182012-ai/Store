@@ -98,6 +98,9 @@ async def buy_number(country_code: str, max_price_usd: float | None = None) -> d
     except (TypeError, ValueError):
         raise ProviderError("Server 2 returned an invalid purchase price.")
 
+    if price <= 0:
+        raise ProviderError("Server 2 returned an invalid purchase price.")
+
     return {
         "number": number,
         "name": str(data.get("name") or country_code.upper()),
