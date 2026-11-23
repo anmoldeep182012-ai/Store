@@ -46,6 +46,7 @@ class Database:
     COLLECTIONS = (
         "users", "countries", "accounts", "orders", "deposits",
         "transactions", "coupons", "coupon_uses", "settings", "counters", "server2_orders",
+        "marketplace_listings", "marketplace_orders", "marketplace_logs",
     )
 
     def __init__(self, uri: str, database_name: str):
@@ -91,6 +92,17 @@ class Database:
         )
         await self.database.server2_orders.create_index([("user_id", ASCENDING), ("_id", DESCENDING)])
         await self.database.server2_orders.create_index([("number", ASCENDING)], unique=True)
+        await self.database.marketplace_listings.create_index(
+            [("status", ASCENDING), ("type", ASCENDING), ("_id", DESCENDING)]
+        )
+        await self.database.marketplace_listings.create_index("chat_id", unique=True)
+        await self.database.marketplace_orders.create_index(
+            [("buyer_id", ASCENDING), ("_id", DESCENDING)]
+        )
+        await self.database.marketplace_orders.create_index(
+            [("status", ASCENDING), ("_id", DESCENDING)]
+        )
+        await self.database.marketplace_orders.create_index("invite_link", sparse=True)
         await self.database.coupon_uses.create_index(
             [("code", ASCENDING), ("user_id", ASCENDING)], unique=True
         )
@@ -520,6 +532,240 @@ class Database:
 
     async def count_server2_orders(self, user_id: int) -> int:
         return await self.database.server2_orders.count_documents({"user_id": user_id})
+
+    # ------------------------------------------------------ channel/group marketplace
+    async def create_marketplace_listing(self, data: dict) -> dict:
+        async with self.tx() as session:
+            listing_id = await self._next_id("marketplace_listings", session)
+            document = {
+                "_id": listing_id,
+                "type": data["type"],
+                "title": data["title"],
+                "username": data.get("username"),
+                "chat_id": int(data["chat_id"]),
+                "chat_title": data["chat_title"],
+                "description": data.get("description", ""),
+                "tags": list(data.get("tags") or []),
+                "price": round(float(data["price"]), 2),
+                "seller_admin_id": int(data["seller_admin_id"]),
+                "delivery_options": ["transfer", "invite"],
+                "status": "active",
+                "verified": True,
+                "verification_method": "telegram_bot_api",
+                "created_at": now(),
+                "updated_at": now(),
+            }
+            await self.database.marketplace_listings.insert_one(document, session=session)
+            await self.database.marketplace_logs.insert_one({
+                "action": "listing_created", "actor_id": int(data["seller_admin_id"]),
+                "listing_id": listing_id, "created_at": now(),
+            }, session=session)
+        return self._plain(document) | {"id": listing_id}
+
+    async def get_marketplace_listing(self, listing_id: int) -> Optional[dict]:
+        document = await self.database.marketplace_listings.find_one({"_id": listing_id})
+        return self._plain(document) | {"id": document["_id"]} if document else None
+
+    async def marketplace_listings(
+        self, listing_type: Optional[str] = None, status: str = "active",
+        offset: int = 0, limit: int = 10,
+    ) -> list[dict]:
+        query: dict[str, Any] = {"status": status, "verified": True}
+        if listing_type:
+            query["type"] = listing_type
+        cursor = self.database.marketplace_listings.find(query).sort(
+            "_id", DESCENDING
+        ).skip(offset).limit(limit)
+        return [self._plain(document) | {"id": document["_id"]}
+                async for document in cursor]
+
+    async def marketplace_listing_count(
+        self, listing_type: Optional[str] = None, status: str = "active"
+    ) -> int:
+        query: dict[str, Any] = {"status": status, "verified": True}
+        if listing_type:
+            query["type"] = listing_type
+        return await self.database.marketplace_listings.count_documents(query)
+
+    async def hide_marketplace_listing(self, listing_id: int, actor_id: int) -> bool:
+        result = await self.database.marketplace_listings.update_one(
+            {"_id": listing_id, "status": "active"},
+            {"$set": {"status": "hidden", "updated_at": now()}},
+        )
+        if result.modified_count:
+            await self.database.marketplace_logs.insert_one({
+                "action": "listing_hidden", "actor_id": actor_id,
+                "listing_id": listing_id, "created_at": now(),
+            })
+        return result.modified_count > 0
+
+    async def delete_marketplace_listing(self, listing_id: int, actor_id: int) -> bool:
+        result = await self.database.marketplace_listings.update_one(
+            {"_id": listing_id, "status": {"$in": ["active", "hidden"]}},
+            {"$set": {"status": "deleted", "updated_at": now()}},
+        )
+        if result.modified_count:
+            await self.database.marketplace_logs.insert_one({
+                "action": "listing_deleted", "actor_id": actor_id,
+                "listing_id": listing_id, "created_at": now(),
+            })
+        return result.modified_count > 0
+
+    async def create_marketplace_order(
+        self, buyer_id: int, listing_id: int, delivery_method: str
+    ) -> dict:
+        async with self.tx() as session:
+            listing = await self.database.marketplace_listings.find_one(
+                {"_id": listing_id, "status": "active", "verified": True},
+                session=session,
+            )
+            if not listing:
+                raise PurchaseError("This listing is no longer available.")
+            if listing["seller_admin_id"] == buyer_id:
+                raise PurchaseError("You cannot purchase your own listing.")
+            if delivery_method not in listing.get("delivery_options", []):
+                raise PurchaseError("That delivery method is not available.")
+            price = round(float(listing["price"]), 2)
+            await self._change_balance(
+                session, buyer_id, -price, "marketplace_purchase",
+                f"Marketplace listing #{listing_id}",
+            )
+            order_id = await self._next_id("marketplace_orders", session)
+            status = "awaiting_transfer" if delivery_method == "transfer" else "awaiting_join"
+            document = {
+                "_id": order_id,
+                "listing_id": listing_id,
+                "buyer_id": buyer_id,
+                "seller_admin_id": listing["seller_admin_id"],
+                "chat_id": listing["chat_id"],
+                "chat_title": listing["chat_title"],
+                "listing_title": listing["title"],
+                "listing_type": listing["type"],
+                "username": listing.get("username"),
+                "price": price,
+                "delivery_method": delivery_method,
+                "status": status,
+                "invite_link": None,
+                "created_at": now(),
+                "updated_at": now(),
+            }
+            result = await self.database.marketplace_listings.update_one(
+                {"_id": listing_id, "status": "active"},
+                {"$set": {
+                    "status": "reserved",
+                    "reserved_order_id": order_id,
+                    "updated_at": now(),
+                }},
+                session=session,
+            )
+            if result.modified_count != 1:
+                raise PurchaseError("Someone else just reserved this listing. Please retry.")
+            await self.database.marketplace_orders.insert_one(document, session=session)
+            await self.database.marketplace_logs.insert_one({
+                "action": "order_created", "actor_id": buyer_id,
+                "listing_id": listing_id, "order_id": order_id,
+                "created_at": now(),
+            }, session=session)
+        return self._plain(document) | {"id": order_id}
+
+    async def get_marketplace_order(self, order_id: int) -> Optional[dict]:
+        document = await self.database.marketplace_orders.find_one({"_id": order_id})
+        return self._plain(document) | {"id": document["_id"]} if document else None
+
+    async def set_marketplace_invite_link(self, order_id: int, invite_link: str) -> bool:
+        result = await self.database.marketplace_orders.update_one(
+            {"_id": order_id, "status": "awaiting_join"},
+            {"$set": {"invite_link": invite_link, "updated_at": now()}},
+        )
+        return result.modified_count > 0
+
+    async def find_marketplace_order_by_invite(self, chat_id: int, invite_link: str) -> Optional[dict]:
+        document = await self.database.marketplace_orders.find_one({
+            "chat_id": int(chat_id), "invite_link": invite_link,
+            "delivery_method": "invite", "status": "awaiting_join",
+        })
+        return self._plain(document) | {"id": document["_id"]} if document else None
+
+    async def complete_marketplace_order(
+        self, order_id: int, actor_id: int, verification: str
+    ) -> Optional[dict]:
+        async with self.tx() as session:
+            order = await self.database.marketplace_orders.find_one(
+                {"_id": order_id, "status": {"$in": ["awaiting_transfer", "awaiting_join"]}},
+                session=session,
+            )
+            if not order:
+                return None
+            result = await self.database.marketplace_orders.update_one(
+                {"_id": order_id, "status": order["status"]},
+                {"$set": {
+                    "status": "completed", "verification": verification,
+                    "verified_at": now(), "updated_at": now(),
+                }},
+                session=session,
+            )
+            if result.modified_count != 1:
+                return None
+            await self.database.marketplace_listings.update_one(
+                {"_id": order["listing_id"], "reserved_order_id": order_id},
+                {"$set": {"status": "sold", "updated_at": now()}},
+                session=session,
+            )
+            await self.database.marketplace_logs.insert_one({
+                "action": "order_completed", "actor_id": actor_id,
+                "listing_id": order["listing_id"], "order_id": order_id,
+                "verification": verification, "created_at": now(),
+            }, session=session)
+        return self._plain(order) | {
+            "id": order_id, "status": "completed", "verification": verification,
+        }
+
+    async def refund_marketplace_order(self, order_id: int, actor_id: int, reason: str) -> Optional[dict]:
+        async with self.tx() as session:
+            order = await self.database.marketplace_orders.find_one(
+                {"_id": order_id, "status": {"$in": ["awaiting_transfer", "awaiting_join"]}},
+                session=session,
+            )
+            if not order:
+                return None
+            await self._change_balance(
+                session, order["buyer_id"], round(float(order["price"]), 2),
+                "refund", f"Marketplace order #{order_id}: {reason}",
+            )
+            await self.database.marketplace_orders.update_one(
+                {"_id": order_id},
+                {"$set": {
+                    "status": "refunded", "refund_reason": reason,
+                    "resolved_by": actor_id, "updated_at": now(),
+                }},
+                session=session,
+            )
+            await self.database.marketplace_listings.update_one(
+                {"_id": order["listing_id"], "reserved_order_id": order_id},
+                {"$set": {"status": "active", "updated_at": now()},
+                 "$unset": {"reserved_order_id": ""}},
+                session=session,
+            )
+            await self.database.marketplace_logs.insert_one({
+                "action": "order_refunded", "actor_id": actor_id,
+                "listing_id": order["listing_id"], "order_id": order_id,
+                "reason": reason, "created_at": now(),
+            }, session=session)
+        return self._plain(order) | {"id": order_id, "status": "refunded"}
+
+    async def marketplace_orders(
+        self, buyer_id: Optional[int] = None, offset: int = 0, limit: int = 15
+    ) -> list[dict]:
+        query = {"buyer_id": buyer_id} if buyer_id is not None else {}
+        cursor = self.database.marketplace_orders.find(query).sort(
+            "_id", DESCENDING
+        ).skip(offset).limit(limit)
+        return [self._plain(document) | {"id": document["_id"]}
+                async for document in cursor]
+
+    async def marketplace_order_count(self, buyer_id: Optional[int] = None) -> int:
+        query = {"buyer_id": buyer_id} if buyer_id is not None else {}
+        return await self.database.marketplace_orders.count_documents(query)
 
     # ------------------------------------------------------------- deposits
     async def create_deposit(self, user_id: int, amount: float) -> int:
