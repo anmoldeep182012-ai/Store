@@ -387,10 +387,10 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
             await query.answer("Insufficient wallet balance.", show_alert=True)
             return
 
-        reserved = estimated
         await db.reserve_server2_balance(
             user_id, estimated, f"Server 2 {country['name']}"
         )
+        reserved = estimated
 
         try:
             purchased = await provider.buy_number(code, country["price_usd"])
@@ -410,6 +410,7 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
 
         if estimated > actual_price:
             await db.refund_server2_balance(user_id, estimated - actual_price, "Server 2 price adjustment")
+            reserved = actual_price
 
         order_id = await db.create_server2_order(
             user_id=user_id,
