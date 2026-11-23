@@ -95,7 +95,7 @@ class Database:
         await self.database.marketplace_listings.create_index(
             [("status", ASCENDING), ("type", ASCENDING), ("_id", DESCENDING)]
         )
-        await self.database.marketplace_listings.create_index("chat_id")
+        await self.database.marketplace_listings.create_index("chat_id", unique=True)
         await self.database.marketplace_orders.create_index(
             [("buyer_id", ASCENDING), ("_id", DESCENDING)]
         )
