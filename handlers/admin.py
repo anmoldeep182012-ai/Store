@@ -516,8 +516,8 @@ async def server2_screen(update: Update, context: Ctx) -> None:
     if configured:
         try:
             balance = await provider.get_balance()
-        except provider.ProviderError:
-            balance = "⚠️ API unavailable"
+        except provider.ProviderError as exc:
+            balance = f"⚠️ {e(exc)}"
 
     text = card(
         "🔌 Server 2 [TG-Lion]",
