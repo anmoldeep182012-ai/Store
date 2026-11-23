@@ -148,6 +148,15 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
     if not listing or listing["status"] != "active":
         await query.answer("This listing is no longer available.", show_alert=True)
         return
+    if method == "invite":
+        try:
+            existing_member = await context.bot.get_chat_member(listing["chat_id"], buyer_id)
+        except Exception:
+            existing_member = None
+        if existing_member and existing_member.status not in ("left", "kicked"):
+            await query.answer("You already have access to this chat. Invite delivery is not available.", show_alert=True)
+            return
+
     try:
         order = await db.create_marketplace_order(buyer_id, listing_id, method)
     except PurchaseError as exc:
@@ -177,16 +186,12 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
             row("Paid", money(order["price"])),
             row("Status", "Awaiting your join request"),
             "",
-            "Use your personal invite link below. The bot will approve your join request "
-            "and verify that your Telegram account joined.",
+            "Open your personal invite link. The bot will approve the request "
+            "only for this buyer and verify the join with Telegram.",
         ), kb(
-            [blue("🔗 Request to Join", "noop")],
+            [url_btn("🔗 Open Personal Invite", invite.invite_link, "primary")],
             [btn("📦 My Marketplace Orders", "market:orders"), btn("🏠 Home", "home")],
         ))
-        await query.message.reply_text(
-            f"🔗 Your private invite link:\n{e(invite.invite_link)}",
-            disable_web_page_preview=True,
-        )
     else:
         await query.answer("✅ Order created!")
         await show(update, card(
@@ -531,6 +536,10 @@ async def marketplace_join_request(update: Update, context: Ctx) -> None:
         order["id"], request.from_user.id, "telegram_order_invite_join"
     )
     if completed:
+        try:
+            await context.bot.revoke_chat_invite_link(request.chat.id, invite)
+        except Exception:
+            pass
         await send(context, request.from_user.id, card(
             f"✅ Marketplace Order #{order['id']} Completed",
             row("Listing", e(order["listing_title"])),
