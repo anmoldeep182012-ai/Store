@@ -468,7 +468,7 @@ def server2_delivery_text(order: dict) -> str:
 
 def server2_delivery_keyboard(order_id: int):
     return kb(
-        [btn("📋 Copy Phone", "noop")],
+        [copy_btn("📋 Copy Phone", str(order_id))],
         [blue("📲 Get OTP", f"s2otp:{order_id}")],
         [btn("📦 Server 2 Orders", "s2orders:0"), btn("🏠 Home", "home")],
     )
