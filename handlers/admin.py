@@ -510,19 +510,20 @@ async def coupon_input(update: Update, context: Ctx, state: dict) -> None:
 
 # ============================================================ server 2
 async def server2_markup_screen(update: Update, context: Ctx) -> None:
-    current = float(await db.get_setting("server2_markup") or 0)
+    current = float(await db.get_setting("server2_commission_inr") or 20)
     await show(update, card(
-        "📈 Server 2 Commission",
-        row("Current commission", f"{current:g}%"),
+        "👑 Server 2 Owner Commission",
+        row("Current commission", money(current)),
         "",
-        "Choose a percentage below or set a custom value.",
-        footer="This applies to every Server 2 purchase. Customers cannot change it.",
+        "Choose the fixed commission added to each account.",
+        "Example: ₹50 provider cost + ₹20 commission = ₹70 customer price.",
+        footer="This is a fixed INR amount per account, not a percentage.",
     ), kb(
-        [btn("5%", "adm:s2markupset:5"), btn("10%", "adm:s2markupset:10"),
-         btn("15%", "adm:s2markupset:15")],
-        [btn("20%", "adm:s2markupset:20"), btn("25%", "adm:s2markupset:25"),
-         btn("30%", "adm:s2markupset:30")],
-        [btn("0%", "adm:s2markupset:0"), blue("✏️ Custom", "adm:s2markupcustom")],
+        [btn("₹0", "adm:s2commset:0"), btn("₹5", "adm:s2commset:5"),
+         btn("₹10", "adm:s2commset:10"), btn("₹15", "adm:s2commset:15")],
+        [btn("₹20", "adm:s2commset:20"), btn("₹25", "adm:s2commset:25"),
+         btn("₹30", "adm:s2commset:30"), btn("₹50", "adm:s2commset:50")],
+        [blue("✏️ Custom amount", "adm:s2commcustom")],
         back("adm:s2"),
     ))
 
@@ -545,7 +546,7 @@ async def server2_rate_screen(update: Update, context: Ctx) -> None:
 
 
 async def server2_screen(update: Update, context: Ctx) -> None:
-    markup = await db.get_setting("server2_markup")
+    commission = await db.get_setting("server2_commission_inr")
     usd_inr = await db.get_setting("server2_usd_inr")
     configured = provider.configured()
     balance = "—"
@@ -559,32 +560,32 @@ async def server2_screen(update: Update, context: Ctx) -> None:
         "🔌 Server 2 [TG-Lion]",
         row("Status", "🟢 Configured" if configured else "🔴 Not configured"),
         row("💰 Provider balance", e(balance)),
-        row("📈 Commission", f"{e(markup)}%"),
+        row("👑 Owner commission", money(float(commission or 20))),
         row("💱 USD/INR", e(usd_inr)),
         "",
         "Server 2 uses TG-Lion API stock only. It is never merged with Server 1.",
     )
     await show(update, text, kb(
-        [btn("📈 Change Commission", "adm:s2markup"),
+        [btn("👑 Change Commission", "adm:s2markup"),
          btn("💱 Change USD/INR", "adm:s2rate")],
         [btn("🔄 Test / Refresh", "adm:s2")],
         back("adm"),
     ))
 
 
-@on_input("s2markup", admin=True)
-async def server2_markup_input(update: Update, context: Ctx, state: dict) -> None:
+@on_input("s2commission", admin=True)
+async def server2_commission_input(update: Update, context: Ctx, state: dict) -> None:
     try:
-        value = float(update.message.text.strip())
-        if value < 0 or value > 500:
+        value = round(float(update.message.text.strip().replace(",", "")), 2)
+        if value < 0 or value > 5000:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Send a commission between 0 and 500%.")
+        await update.message.reply_text("❌ Send a commission amount between ₹0 and ₹5,000.")
         return
     clear_state(context)
-    await db.set_setting("server2_markup", str(round(value, 2)))
+    await db.set_setting("server2_commission_inr", str(value))
     await update.message.reply_text(
-        f"✅ Server 2 commission updated to <b>{value:g}%</b>.",
+        f"✅ Server 2 fixed commission updated to <b>{money(value)}</b> per account.",
         reply_markup=kb([btn("‹ Server 2", "adm:s2")]),
     )
 
@@ -684,7 +685,7 @@ async def admin_cb(update: Update, context: Ctx) -> None:
     clear_state(context)
 
     if action in ("adel", "cdelok", "cpx", "maint", "ctog", "uban", "bcgo", "backup",
-                  "s2markupset", "s2rateset"):
+                  "s2commset", "s2rateset"):
         pass  # these answer the query themselves below
     else:
         await query.answer()
@@ -778,20 +779,20 @@ async def admin_cb(update: Update, context: Ctx) -> None:
         await server2_screen(update, context)
     elif action == "s2markup":
         await server2_markup_screen(update, context)
-    elif action == "s2markupset":
+    elif action == "s2commset":
         try:
-            value = float(args[0])
-            if not 0 <= value <= 500:
+            value = round(float(args[0]), 2)
+            if not 0 <= value <= 5000:
                 raise ValueError
         except (ValueError, IndexError):
-            await query.answer("Choose a commission between 0% and 500%.", show_alert=True)
+            await query.answer("Choose a commission between ₹0 and ₹5,000.", show_alert=True)
             return
-        await db.set_setting("server2_markup", str(round(value, 2)))
-        await query.answer(f"Commission set to {value:g}%")
+        await db.set_setting("server2_commission_inr", str(value))
+        await query.answer(f"Owner commission set to {money(value)}")
         await server2_screen(update, context)
-    elif action == "s2markupcustom":
-        await ask(update, context, "s2markup", "adm:s2",
-                  "✏️ Send a custom commission percentage (0–500).")
+    elif action == "s2commcustom":
+        await ask(update, context, "s2commission", "adm:s2",
+                  "✏️ Send the fixed owner commission in INR (₹0–₹5,000).")
     elif action == "s2rate":
         await server2_rate_screen(update, context)
     elif action == "s2rateset":
