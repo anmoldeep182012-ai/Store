@@ -153,8 +153,17 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
             existing_member = await context.bot.get_chat_member(listing["chat_id"], buyer_id)
         except Exception:
             existing_member = None
-        if existing_member and existing_member.status not in ("left", "kicked"):
-            await query.answer("You already have access to this chat. Invite delivery is not available.", show_alert=True)
+        if existing_member and existing_member.status == ChatMemberStatus.BANNED:
+            await query.answer(
+                "You are banned from this chat. Ask the owner to unban you before purchasing.",
+                show_alert=True,
+            )
+            return
+        if existing_member and existing_member.status != ChatMemberStatus.LEFT:
+            await query.answer(
+                "You already have access to this chat. Invite delivery is not available.",
+                show_alert=True,
+            )
             return
 
     try:
