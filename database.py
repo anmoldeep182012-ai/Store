@@ -486,6 +486,8 @@ class Database:
         provider_price_usd: float,
         price: float,
         number: str,
+        provider_cost_inr: float = 0.0,
+        commission_inr: float = 0.0,
         code: str = "",
         password: str = "",
     ) -> int:
@@ -497,6 +499,8 @@ class Database:
                 "country_code": country_code.upper(),
                 "country_name": country_name,
                 "provider_price_usd": round(provider_price_usd, 4),
+                "provider_cost_inr": round(provider_cost_inr, 2),
+                "commission_inr": round(commission_inr, 2),
                 "price": round(price, 2),
                 "number": number,
                 "code": code or None,
