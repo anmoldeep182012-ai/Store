@@ -597,7 +597,11 @@ async def orders_cb(update: Update, context: Ctx) -> None:
     total = await db.count_user_orders(user_id)
     if not total:
         await show(update, card("📦 My Orders", "You haven't bought anything yet."),
-                   kb([blue("🛒 Start Shopping", "shop:0")], back()))
+                   kb(
+                       [blue("🛒 Start Shopping", "shop:0")],
+                       [btn("📢 Marketplace Orders", "market:orders")],
+                       back(),
+                   ))
         return
     pages = math.ceil(total / ORDERS_PER_PAGE)
     page = max(0, min(page, pages - 1))
@@ -606,7 +610,12 @@ async def orders_cb(update: Update, context: Ctx) -> None:
                     f"o:{o['id']}")] for o in orders]
     text = card("📦 My Orders", row("Total orders", str(total)), "",
                 "Tap an order to view its details.")
-    await show(update, text, kb(*buttons, pager("orders", page, pages), [btn("🖥 Server 2 Orders", "s2orders:0")], back()))
+    await show(update, text, kb(
+        *buttons,
+        pager("orders", page, pages),
+        [btn("🖥 Server 2 Orders", "s2orders:0"), btn("📢 Marketplace Orders", "market:orders")],
+        back(),
+    ))
 
 
 async def order_cb(update: Update, context: Ctx) -> None:
