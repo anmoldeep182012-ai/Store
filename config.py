@@ -17,6 +17,11 @@ PAYMENT_TIMEOUT_MIN = int(os.getenv("PAYMENT_TIMEOUT_MIN", "15"))
 MAX_PENDING_DEPOSITS = int(os.getenv("MAX_PENDING_DEPOSITS", "3"))
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "15"))
 
+# Server 2 (TG-Lion provider). Keep these secrets in .env, never in source control.
+TG_LION_API_KEY = os.getenv("TG_LION_API_KEY", "")
+TG_LION_YOUR_ID = os.getenv("TG_LION_YOUR_ID", "")
+TG_LION_BASE_URL = os.getenv("TG_LION_BASE_URL", "https://www.tg-lion.net/")
+
 API_ID = int(os.getenv("API_ID") or 0)
 API_HASH = os.getenv("API_HASH", "")
 MONGODB_URI = os.getenv("MONGODB_URI", "")
