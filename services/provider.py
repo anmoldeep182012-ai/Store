@@ -7,13 +7,15 @@ the local countries/accounts collections.
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 import httpx
 
 import config
 
 
-BASE_URL = config.TG_LION_BASE_URL
+log = logging.getLogger(__name__)
+BASE_URL = config.TG_LION_BASE_URL.strip() or "https://tg-lion.net/"
 
 
 class ProviderError(Exception):
@@ -36,12 +38,39 @@ async def _request(action: str, **params: Any) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             response = await client.get(BASE_URL, params=query)
             response.raise_for_status()
-            data = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise ProviderError("Server 2 is temporarily unavailable.") from exc
+    except httpx.TimeoutException as exc:
+        log.warning("TG-Lion %s request timed out", action)
+        raise ProviderError("TG-Lion did not respond in time. Try again shortly.") from exc
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        log.warning("TG-Lion %s returned HTTP %s", action, status)
+        if status in (401, 403):
+            raise ProviderError(
+                f"TG-Lion rejected the credentials (HTTP {status}). Check TG_LION_API_KEY and TG_LION_YOUR_ID."
+            ) from exc
+        raise ProviderError(
+            f"TG-Lion returned HTTP {status}. Check the API URL or try again later."
+        ) from exc
+    except httpx.RequestError as exc:
+        log.warning("TG-Lion %s connection failed: %s", action, type(exc).__name__)
+        raise ProviderError(
+            "Could not connect to TG-Lion. Check TG_LION_BASE_URL and provider availability."
+        ) from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        content_type = response.headers.get("content-type", "unknown")
+        log.warning(
+            "TG-Lion %s returned non-JSON content (HTTP %s, content-type %s)",
+            action, response.status_code, content_type,
+        )
+        raise ProviderError(
+            "TG-Lion returned an unexpected response instead of JSON. Check the API URL or contact TG-Lion support."
+        ) from exc
 
     if not isinstance(data, dict):
         raise ProviderError("Server 2 returned an invalid response.")
