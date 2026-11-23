@@ -406,19 +406,33 @@ async def marketplace_tags_input(update: Update, context: Ctx, state: dict) -> N
     tags = [] if update.message.text.strip() == "-" else [
         tag.strip().lstrip("#")[:32] for tag in update.message.text.split(",") if tag.strip()
     ][:8]
+    saved = {
+        key: state[key]
+        for key in ("chat_id", "chat_title", "username", "type", "price")
+    }
+    saved["tags"] = tags
+    set_state(context, "marketplace_description", **saved)
+    await update.message.reply_text(
+        "📝 Send a short listing description (or send <code>-</code> to skip)."
+    )
+
+
+@on_input("marketplace_description", admin=True)
+async def marketplace_description_input(update: Update, context: Ctx, state: dict) -> None:
+    description = "" if update.message.text.strip() == "-" else update.message.text.strip()[:700]
     data = {
-        key: state[key] for key in ("chat_id", "chat_title", "username", "type", "price")
+        key: state[key]
+        for key in ("chat_id", "chat_title", "username", "type", "price", "tags")
     }
     data.update({
-        "description": "",
-        "tags": tags,
+        "description": description,
         "seller_admin_id": update.effective_user.id,
     })
     try:
         listing = await db.create_marketplace_listing(data)
-    except Exception:
+    except Exception as exc:
         await update.message.reply_text(
-            "⚠️ Could not save this listing. Check that it isn't already listed and try again."
+            f"⚠️ Could not save this listing: {e(exc)}"
         )
         clear_state(context)
         return
@@ -430,7 +444,8 @@ async def marketplace_tags_input(update: Update, context: Ctx, state: dict) -> N
             row("Title", e(listing["title"])),
             row("Type", listing["type"].title()),
             row("Price", money(listing["price"])),
-            row("Tags", e(", ".join(tags) or "None")),
+            row("Tags", e(", ".join(data["tags"]) or "None")),
+            row("Description", e(description or "None")),
             footer="Ownership and bot permissions were verified with Telegram.",
         ),
         reply_markup=kb([btn("⚙️ Marketplace Manager", "mktadm")]),
