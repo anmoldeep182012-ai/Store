@@ -40,7 +40,6 @@ async def home_screen(update: Update, context: Ctx) -> None:
     )
     rows = [
         [blue("🛒  Buy Accounts", "shop:0")],
-        [blue("🔎 Search Server 2 [Stable Acc]", "s2search")],
         [green("💳 Deposit", "dep"), btn("👛 Wallet", "wallet")],
         [btn("📦 My Orders", "orders:0"), btn("🎁 Refer & Earn", "ref")],
         [btn("🎟 Redeem Code", "redeem"), btn("🆘 Help", "help")],
