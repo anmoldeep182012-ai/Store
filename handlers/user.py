@@ -254,7 +254,7 @@ async def server2_search_cb(update: Update, context: Ctx) -> None:
         "🔎 Search Server 2 [Stable Acc]",
         "Send a country name, code, or a few letters.",
         "",
-        "Examples: <code>India</code>, <code>in</code>, <code>uni</code>",
+        "Examples: <code>United Kingdom</code>, <code>UK</code>, <code>GB</code>, <code>India</code>, <code>in</code>, <code>uni</code>",
         footer="Server 2 contains provider accounts only. Server 1 stock is separate.",
     ), kb([red("✖ Cancel", "shop:0")]))
 
