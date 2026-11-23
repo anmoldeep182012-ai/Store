@@ -440,7 +440,7 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
         "price": actual_price,
         "code": None,
         "password": None,
-    }), server2_delivery_keyboard(order_id))
+    }), server2_delivery_keyboard({"id": order_id, "number": purchased["number"]}))
     await log_event(context, card(
         "🖥 Server 2 Sale",
         f"▸ Buyer: {user_link(user_id, update.effective_user.username, update.effective_user.first_name)}",
@@ -466,10 +466,10 @@ def server2_delivery_text(order: dict) -> str:
     )
 
 
-def server2_delivery_keyboard(order_id: int):
+def server2_delivery_keyboard(order: dict):
     return kb(
-        [copy_btn("📋 Copy Phone", str(order_id))],
-        [blue("📲 Get OTP", f"s2otp:{order_id}")],
+        [copy_btn("📋 Copy Phone", str(order["number"]))],
+        [blue("📲 Get OTP", f"s2otp:{order['id']}")],
         [btn("📦 Server 2 Orders", "s2orders:0"), btn("🏠 Home", "home")],
     )
 
@@ -483,7 +483,7 @@ async def server2_otp_cb(update: Update, context: Ctx) -> None:
 
     if order.get("code") and order.get("password"):
         await query.answer("OTP already fetched.", show_alert=True)
-        await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+        await show(update, server2_delivery_text(order), server2_delivery_keyboard(order))
         return
 
     await query.answer("⏳ Requesting code…")
