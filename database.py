@@ -536,6 +536,12 @@ class Database:
     # ------------------------------------------------------ channel/group marketplace
     async def create_marketplace_listing(self, data: dict) -> dict:
         async with self.tx() as session:
+            existing = await self.database.marketplace_listings.find_one(
+                {"chat_id": int(data["chat_id"]), "status": {"$in": ["active", "reserved"]}},
+                session=session,
+            )
+            if existing:
+                raise PurchaseError("This channel/group already has an active marketplace listing.")
             listing_id = await self._next_id("marketplace_listings", session)
             document = {
                 "_id": listing_id,
