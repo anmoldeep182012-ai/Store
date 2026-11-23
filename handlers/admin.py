@@ -533,7 +533,7 @@ async def server2_screen(update: Update, context: Ctx) -> None:
          btn("💱 Change USD/INR", "adm:s2rate")],
         [btn("🔄 Test / Refresh", "adm:s2")],
         back("adm"),
-    )
+    ))
 
 
 @on_input("s2markup", admin=True)
