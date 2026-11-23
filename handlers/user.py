@@ -529,7 +529,7 @@ async def server2_order_cb(update: Update, context: Ctx) -> None:
         await update.callback_query.answer("Order not found.", show_alert=True)
         return
     await update.callback_query.answer()
-    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order))
 
 
 # --------------------------------------------------------------- orders
