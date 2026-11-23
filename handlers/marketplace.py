@@ -498,37 +498,66 @@ async def marketplace_chat_member(update: Update, context: Ctx) -> None:
     member_update = update.chat_member
     if not member_update:
         return
+
     chat_id = member_update.chat.id
     changed_user = member_update.new_chat_member.user
     new_status = member_update.new_chat_member.status
-
-    # Invite orders are completed only by their order-specific join-request
-    # handler below; a normal public join must never complete a paid order.
     order = None
     verification = None
+
+    # Ownership transfer: the buyer must become the actual Telegram creator.
     if new_status == ChatMemberStatus.OWNER:
         order = await db.find_pending_transfer_order(chat_id, changed_user.id)
         verification = "telegram_creator_transfer"
 
+    # Invite delivery: use Telegram's invite_link field to match the exact
+    # per-order link. A normal/public join can never complete a paid order.
+    if (
+        order is None
+        and member_update.invite_link
+        and new_status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+    ):
+        invite = member_update.invite_link.invite_link
+        order = await db.find_marketplace_order_by_invite(chat_id, invite)
+        if order and order["buyer_id"] == changed_user.id:
+            verification = "telegram_order_invite_join"
+        else:
+            order = None
+
     if not order:
         return
 
-    # Confirm against Telegram's current membership state rather than trusting only
-    # a stale event payload.
     try:
         current = await context.bot.get_chat_member(chat_id, changed_user.id)
     except Exception:
         return
-    if verification == "telegram_creator_transfer" and current.status != ChatMemberStatus.OWNER:
-        return
-    if verification == "telegram_invite_join" and current.status in (
-        "left", "kicked", "restricted"
+
+    if verification == "telegram_creator_transfer":
+        if current.status != ChatMemberStatus.OWNER:
+            return
+    elif current.status not in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.OWNER,
     ):
         return
 
-    completed = await db.complete_marketplace_order(order["id"], changed_user.id, verification)
+    completed = await db.complete_marketplace_order(
+        order["id"], changed_user.id, verification
+    )
     if not completed:
         return
+
+    if verification == "telegram_order_invite_join" and order.get("invite_link"):
+        try:
+            await context.bot.revoke_chat_invite_link(chat_id, order["invite_link"])
+        except Exception:
+            pass
+
     await send(context, changed_user.id, card(
         f"✅ Marketplace Order #{order['id']} Completed",
         row("Listing", e(order["listing_title"])),
