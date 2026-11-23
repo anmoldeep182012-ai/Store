@@ -279,7 +279,7 @@ async def server2_list_cb(update: Update, context: Ctx) -> None:
         await show(update, card("⚠️ Server 2 unavailable", e(exc)), kb(back("shop:0")))
         return
 
-    countries = sorted(countries, key=lambda item: (item["qty"] <= 0, item["name"].casefold()))
+    # Preserve the provider order, matching the country catalogue shown by TG-Lion.
     total = len(countries)
     pages = max(1, (total + SERVER2_COUNTRIES_PER_PAGE - 1) // SERVER2_COUNTRIES_PER_PAGE)
     page = min(page, pages - 1)
@@ -296,9 +296,14 @@ async def server2_list_cb(update: Update, context: Ctx) -> None:
     rows, pair = [], []
     for country in chunk:
         selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
-        stock_mark = "📦" if country["qty"] > 0 else "✖"
+        code = country["code"].upper()
+        flag_code = "GB" if code == "UK" else code
+        flag = ""
+        if len(flag_code) == 2 and flag_code.isalpha():
+            flag = "".join(chr(127397 + ord(char)) for char in flag_code)
+        stock_mark = "" if country["qty"] > 0 else " ✖"
         pair.append(btn(
-            f"{country['name']} • {money(selling)} {stock_mark}",
+            f"{country['name']} {flag} — {money(selling)}{stock_mark}",
             f"s2:{country['code']}",
             style="primary" if country["qty"] > 0 else None,
         ))
