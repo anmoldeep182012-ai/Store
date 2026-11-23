@@ -95,7 +95,7 @@ class Database:
         await self.database.marketplace_listings.create_index(
             [("status", ASCENDING), ("type", ASCENDING), ("_id", DESCENDING)]
         )
-        await self.database.marketplace_listings.create_index("chat_id", unique=True)
+        await self.database.marketplace_listings.create_index("chat_id")
         await self.database.marketplace_orders.create_index(
             [("buyer_id", ASCENDING), ("_id", DESCENDING)]
         )
@@ -678,6 +678,13 @@ class Database:
             {"$set": {"invite_link": invite_link, "updated_at": now()}},
         )
         return result.modified_count > 0
+
+    async def find_pending_transfer_order(self, chat_id: int, buyer_id: int) -> Optional[dict]:
+        document = await self.database.marketplace_orders.find_one({
+            "chat_id": int(chat_id), "buyer_id": int(buyer_id),
+            "delivery_method": "transfer", "status": "awaiting_transfer",
+        })
+        return self._plain(document) | {"id": document["_id"]} if document else None
 
     async def find_marketplace_order_by_invite(self, chat_id: int, invite_link: str) -> Optional[dict]:
         document = await self.database.marketplace_orders.find_one({
