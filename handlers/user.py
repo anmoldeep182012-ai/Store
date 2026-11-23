@@ -491,16 +491,14 @@ async def server2_otp_cb(update: Update, context: Ctx) -> None:
         credentials = await provider.get_code(order["number"])
     except provider.ProviderError as exc:
         await query.message.reply_text(
-            f"⌛ {e(exc)}
-
-If you just requested the Telegram login code, wait a few seconds and tap <b>📲 Get OTP</b> again."
+            f"⌛ {e(exc)}\\n\\nIf you just requested the Telegram login code, wait a few seconds and tap <b>📲 Get OTP</b> again."
         )
         return
 
     order = await db.update_server2_credentials(
         order["id"], credentials["code"], credentials["pass"]
     )
-    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order["id"]))
+    await show(update, server2_delivery_text(order), server2_delivery_keyboard(order))
 
 
 async def server2_orders_cb(update: Update, context: Ctx) -> None:
