@@ -13,7 +13,7 @@ import httpx
 import config
 
 
-BASE_URL = "https://www.tg-lion.net/"
+BASE_URL = config.TG_LION_BASE_URL
 
 
 class ProviderError(Exception):
