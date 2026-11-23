@@ -64,6 +64,26 @@ async def noop_cb(update: Update, context: Ctx) -> None:
 
 # ----------------------------------------------------------------- shop
 async def shop_cb(update: Update, context: Ctx) -> None:
+    await update.callback_query.answer()
+    countries = await db.countries()
+    total_stock = sum(country["stock"] for country in countries)
+    await show(update, card(
+        "🛒 Buy Accounts",
+        "Choose where you want to shop.",
+        "",
+        row("🖥 Server 1", f"{len(countries)} countries • {total_stock} accounts"),
+        row("🖥 Server 2", "TG-Lion provider stock"),
+        row("📢 Marketplace", "Verified channels & groups"),
+        footer="Server 1, Server 2 and Marketplace inventories are separate.",
+    ), kb(
+        [blue("📦 Server 1 [Owner Stock]", "shop1:0")],
+        [blue("🔎 Search Server 2 [Stable Acc]", "s2search")],
+        [blue("📢 Channels & Groups", "market:home")],
+        back("home"),
+    ))
+
+
+async def server1_shop_cb(update: Update, context: Ctx) -> None:
     query = update.callback_query
     await query.answer()
     page = int(query.data.split(":")[1])
@@ -97,8 +117,8 @@ async def shop_cb(update: Update, context: Ctx) -> None:
         "Tap a country to see price and stock.",
         footer="✖ = out of stock",
     )
-    await show(update, text, kb(*buttons, pager("shop", page, pages),
-                                [blue("🔎 Search Server 2 [Stable Acc]", "s2search")], back()))
+    await show(update, text, kb(*buttons, pager("shop1", page, pages),
+                                [blue("🔎 Search Server 2 [Stable Acc]", "s2search")], back("shop:0")))
 
 
 async def country_cb(update: Update, context: Ctx) -> None:
@@ -140,7 +160,7 @@ async def country_cb(update: Update, context: Ctx) -> None:
             rows.append([blue(f"💳 Add {money(need)} to buy", "dep")])
     else:
         rows.append([btn("🔔 Out of stock. Check back later", "noop")])
-    rows.append(back_home("shop:0"))
+    rows.append(back_home("shop1:0"))
     await show(update, text, kb(*rows))
 
 
@@ -742,7 +762,7 @@ async def help_cb(update: Update, context: Ctx) -> None:
         "🆘 Help Center",
         "<b>How to buy</b>",
         "1️⃣ Add funds with 💳 <b>Deposit</b> (UPI).",
-        "2️⃣ Open 🛒 <b>Buy Accounts</b> and pick a country.",
+        "2️⃣ Open 🛒 <b>Buy Accounts</b> and choose Server 1, Server 2 or Channels & Groups.",
         "3️⃣ Confirm. The account is delivered instantly.",
         "4️⃣ Log in and tap 📲 <b>Get OTP</b> for the code.",
         "",
@@ -764,7 +784,8 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("help", help_cb))
     app.add_handler(CallbackQueryHandler(home_cb, pattern=r"^home$"))
     app.add_handler(CallbackQueryHandler(noop_cb, pattern=r"^noop$"))
-    app.add_handler(CallbackQueryHandler(shop_cb, pattern=r"^shop:-?\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_cb, pattern=r"^shop:0$"))
+    app.add_handler(CallbackQueryHandler(server1_shop_cb, pattern=r"^shop1:-?\d+$"))
     app.add_handler(CallbackQueryHandler(server2_search_cb, pattern=r"^s2search$"))
     app.add_handler(CallbackQueryHandler(server2_country_cb, pattern=r"^s2:[A-Z]+$"))
     app.add_handler(CallbackQueryHandler(server2_buy_cb, pattern=r"^s2buy:[A-Z]+$"))
