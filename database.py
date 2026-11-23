@@ -605,6 +605,21 @@ class Database:
             })
         return result.modified_count > 0
 
+    async def update_marketplace_price(
+        self, listing_id: int, price: float, actor_id: int
+    ) -> bool:
+        result = await self.database.marketplace_listings.update_one(
+            {"_id": listing_id, "status": {"$in": ["active", "hidden"]}},
+            {"$set": {"price": round(float(price), 2), "updated_at": now()}},
+        )
+        if result.modified_count:
+            await self.database.marketplace_logs.insert_one({
+                "action": "listing_price_updated", "actor_id": actor_id,
+                "listing_id": listing_id, "price": round(float(price), 2),
+                "created_at": now(),
+            })
+        return result.modified_count > 0
+
     async def delete_marketplace_listing(self, listing_id: int, actor_id: int) -> bool:
         result = await self.database.marketplace_listings.update_one(
             {"_id": listing_id, "status": {"$in": ["active", "hidden"]}},
