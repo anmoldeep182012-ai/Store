@@ -686,6 +686,13 @@ class Database:
         })
         return self._plain(document) | {"id": document["_id"]} if document else None
 
+    async def find_pending_invite_order(self, chat_id: int, buyer_id: int) -> Optional[dict]:
+        document = await self.database.marketplace_orders.find_one({
+            "chat_id": int(chat_id), "buyer_id": int(buyer_id),
+            "delivery_method": "invite", "status": "awaiting_join",
+        })
+        return self._plain(document) | {"id": document["_id"]} if document else None
+
     async def find_marketplace_order_by_invite(self, chat_id: int, invite_link: str) -> Optional[dict]:
         document = await self.database.marketplace_orders.find_one({
             "chat_id": int(chat_id), "invite_link": invite_link,
