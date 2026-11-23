@@ -17,7 +17,7 @@ import config
 from core import Ctx, clear_state, is_admin, route_input
 from database import db
 from mongo_persistence import MongoPersistence
-from handlers import admin, deposit, user
+from handlers import admin, deposit, marketplace, user
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -29,6 +29,11 @@ _hits: dict[int, deque] = defaultdict(deque)
 
 async def gate(update: Update, context: Ctx) -> None:
     """Runs before every handler: registers users, rate-limits, enforces bans/maintenance."""
+    # These updates are required for marketplace verification inside channels/groups.
+    # They are not private-chat user interactions and must bypass the private-chat gate.
+    if update.chat_member or update.chat_join_request:
+        return
+
     tg_user = update.effective_user
     if not tg_user or not update.effective_chat:
         raise ApplicationHandlerStop
@@ -136,6 +141,7 @@ def main() -> None:
     user.register(app)
     deposit.register(app)
     admin.register(app)
+    marketplace.register(app)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, route_input))
     app.add_error_handler(on_error)
 
