@@ -261,6 +261,14 @@ def delivery_keyboard(order: dict, back_label: str = "📦 My Orders"):
 SERVER2_COUNTRIES_PER_PAGE = 12
 
 
+def server2_price_breakdown(provider_price_usd: float, usd_inr: float, commission_inr: float) -> tuple[float, float, float]:
+    """Return provider cost INR, fixed owner commission INR, and customer price."""
+    provider_cost_inr = round(float(provider_price_usd) * float(usd_inr), 2)
+    owner_commission = round(float(commission_inr), 2)
+    customer_price = round(provider_cost_inr + owner_commission, 2)
+    return provider_cost_inr, owner_commission, customer_price
+
+
 async def server2_list_cb(update: Update, context: Ctx) -> None:
     query = update.callback_query
     await query.answer()
@@ -283,7 +291,7 @@ async def server2_list_cb(update: Update, context: Ctx) -> None:
     total = len(countries)
     pages = max(1, (total + SERVER2_COUNTRIES_PER_PAGE - 1) // SERVER2_COUNTRIES_PER_PAGE)
     page = min(page, pages - 1)
-    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    commission_inr = float(await db.get_setting("server2_commission_inr") or 20)
     usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
     if usd_inr <= 0:
         await show(update, card(
@@ -295,7 +303,7 @@ async def server2_list_cb(update: Update, context: Ctx) -> None:
     chunk = countries[page * SERVER2_COUNTRIES_PER_PAGE:(page + 1) * SERVER2_COUNTRIES_PER_PAGE]
     rows, pair = [], []
     for country in chunk:
-        selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        selling = server2_price_breakdown(country["price_usd"], usd_inr, commission_inr)[2]
         code = country["code"].upper()
         flag_code = "GB" if code == "UK" else code
         flag = ""
@@ -318,7 +326,7 @@ async def server2_list_cb(update: Update, context: Ctx) -> None:
         "Select a country to buy:",
         row("🌍 Countries", str(total)),
         row("📄 Page", f"{page + 1}/{pages}"),
-        footer=f"Markup: {markup_percent:g}% • USD/INR: {usd_inr:g}",
+        footer=f"Owner commission: {money(commission_inr)} • USD/INR: {usd_inr:g}",
     )
     navigation = []
     if page < pages - 1:
@@ -414,7 +422,7 @@ async def server2_search_input(update: Update, context: Ctx, state: dict) -> Non
 
     clear_state(context)
     matches = sorted(matches, key=lambda item: (item["qty"] == 0, item["name"].casefold()))
-    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    commission_inr = float(await db.get_setting("server2_commission_inr") or 20)
     usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
     if usd_inr <= 0:
         await update.message.reply_text("⚠️ Server 2 INR conversion rate is not configured.")
@@ -422,7 +430,7 @@ async def server2_search_input(update: Update, context: Ctx, state: dict) -> Non
 
     rows = []
     for country in matches[:20]:
-        selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        selling = server2_price_breakdown(country["price_usd"], usd_inr, commission_inr)[2]
         stock = "✖" if country["qty"] <= 0 else f"📦 {country['qty']}"
         rows.append([btn(
             f"{country['name']} • {money(selling)} • {stock}",
@@ -436,7 +444,7 @@ async def server2_search_input(update: Update, context: Ctx, state: dict) -> Non
         row("🌍 Matches", str(len(matches))),
         "",
         "Select a country to buy from Server 2.",
-        footer=f"Markup: {markup_percent:g}% • USD/INR: {usd_inr:g}",
+        footer=f"Owner commission: {money(commission_inr)} • USD/INR: {usd_inr:g}",
     )
     await update.message.reply_text(
         text,
@@ -461,21 +469,21 @@ async def server2_country_cb(update: Update, context: Ctx) -> None:
         await query.answer("Server 2 is out of stock for this country.", show_alert=True)
         return
 
-    markup_percent = float(await db.get_setting("server2_markup") or 0)
+    commission_inr = float(await db.get_setting("server2_commission_inr") or 20)
     usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
     if usd_inr <= 0:
         await query.answer("Server 2 INR rate is not configured.", show_alert=True)
         return
 
-    selling = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+    selling = server2_price_breakdown(country["price_usd"], usd_inr, commission_inr)[2]
     user = await db.get_user(update.effective_user.id)
     await query.answer()
 
     text = card(
         f"🌍 {e(country['name'])}",
         row("🖥 Server", "Server 2 • Stable Acc"),
-        row("💵 Provider price", f"USD {country['price_usd']:.4f}"),
-        row("📈 Commission", f"{markup_percent:g}%"),
+        row("🏦 Provider cost", money(server2_price_breakdown(country["price_usd"], usd_inr, commission_inr)[0])),
+        row("👑 Owner commission", money(commission_inr)),
         row("💰 Your price", money(selling)),
         row("📦 Stock", str(country["qty"])),
         row("💳 Your balance", money(user["balance"])),
@@ -504,12 +512,12 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
             await query.answer("Country is out of stock.", show_alert=True)
             return
 
-        markup_percent = float(await db.get_setting("server2_markup") or 0)
+        commission_inr = float(await db.get_setting("server2_commission_inr") or 20)
         usd_inr = float(await db.get_setting("server2_usd_inr") or 0)
         if usd_inr <= 0:
             raise provider.ProviderError("Server 2 INR conversion rate is not configured.")
 
-        estimated = round(country["price_usd"] * usd_inr * (1 + markup_percent / 100), 2)
+        estimated = server2_price_breakdown(country["price_usd"], usd_inr, commission_inr)[2]
         user = await db.get_user(user_id)
         if user["balance"] < estimated:
             await query.answer("Insufficient wallet balance.", show_alert=True)
@@ -527,9 +535,9 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
             reserved = 0.0
             raise
 
-        actual_price = round(
-            purchased["price_usd"] * usd_inr * (1 + markup_percent / 100), 2
-        )
+        actual_provider_cost = round(purchased["price_usd"] * usd_inr, 2)
+        actual_commission = commission_inr
+        actual_price = round(actual_provider_cost + actual_commission, 2)
         if actual_price > estimated:
             await db.refund_server2_balance(user_id, estimated, "Server 2 price mismatch")
             reserved = 0.0
@@ -547,6 +555,8 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
             provider_price_usd=purchased["price_usd"],
             price=actual_price,
             number=purchased["number"],
+            provider_cost_inr=actual_provider_cost,
+            commission_inr=actual_commission,
         )
         reserved = 0.0
     except provider.ProviderError as exc:
@@ -567,6 +577,8 @@ async def server2_buy_cb(update: Update, context: Ctx) -> None:
         "country_code": code,
         "number": purchased["number"],
         "price": actual_price,
+        "provider_cost_inr": actual_provider_cost,
+        "commission_inr": actual_commission,
         "code": None,
         "password": None,
     }), server2_delivery_keyboard({"id": order_id, "number": purchased["number"]}))
@@ -588,6 +600,8 @@ def server2_delivery_text(order: dict) -> str:
         f"▸ 📱 Phone: <code>{e(order['number'])}</code>",
         f"▸ 📲 OTP: <code>{e(order.get('code') or 'Tap Get OTP')}</code>",
         f"▸ 🔐 Password: <code>{e(order.get('password') or 'Tap Get OTP')}</code>",
+        row("🏦 Provider cost", money(order.get("provider_cost_inr", 0))),
+        row("👑 Owner commission", money(order.get("commission_inr", 0))),
         row("💵 Paid", money(order["price"])),
         "",
         "Use <b>📲 Get OTP</b> below when Telegram asks for the login code.",
