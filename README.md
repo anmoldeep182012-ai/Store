@@ -148,3 +148,17 @@ services/otp.py      optional Telethon OTP reader
 ## 💡 Tips
 - Set `LOG_CHANNEL_ID` to get every sale and approved deposit posted to a private channel.
 - Take a 💾 Backup regularly. The JSON backup contains customer and inventory data, so keep it private.
+
+## Server 2 — TG-Lion [Stable Acc]
+
+Server 2 is intentionally separate from the owner-managed Server 1 stock.
+
+- Server 1: countries and accounts added by the owner/admin in MongoDB.
+- Server 2: live countries/stock returned by the TG-Lion API.
+- Users can search Server 2 by country name, code, or partial text.
+- Server 2 prices are calculated as provider USD price × configured USD/INR rate × (1 + commission %).
+- Admins can change the Server 2 commission and USD/INR rate from the admin panel.
+- Server 2 orders are stored separately from Server 1 orders.
+- TG-Lion API credentials belong in .env (TG_LION_API_KEY and TG_LION_YOUR_ID).
+
+The provider API used by this integration documents available_countries, get_balance, getNumber, and getCode.
