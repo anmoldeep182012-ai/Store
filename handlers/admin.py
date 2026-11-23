@@ -23,6 +23,7 @@ from ui.theme import (
     back, back_home, blue, btn, card, e, green, kb, local_time, money, pager, red, row,
     stock_bar,
 )
+from services import provider
 from services.session_generator import (
     cleanup_pending_session,
     finish_session_login,
@@ -43,6 +44,8 @@ SETTINGS = {
     "min_deposit": ("⬇️ Minimum deposit", "number"),
     "ref_percent": ("🎁 Referral %", "number"),
     "otp_hours": ("⏱ OTP window (hours)", "number"),
+    "server2_markup": ("📈 Server 2 commission %", "number"),
+    "server2_usd_inr": ("💱 Server 2 USD/INR rate", "number"),
 }
 
 
@@ -157,6 +160,7 @@ async def dashboard(update: Update, context: Ctx) -> None:
         [green(f"💳 Deposits{pending}", "adm:deps"), btn("🧾 Orders", "adm:orders")],
         [btn("👤 Users", "adm:users"), btn("📢 Broadcast", "adm:bc")],
         [btn("🎟 Coupons", "adm:cp"), btn("🛠 Settings", "adm:set")],
+        [blue("🔌 Server 2 [TG-Lion]", "adm:s2")],
         [btn("💾 Backup", "adm:backup"), btn("🔄 Refresh", "adm")],
         [btn("🏠 Exit to Store", "home")],
     ))
@@ -503,6 +507,69 @@ async def coupon_input(update: Update, context: Ctx, state: dict) -> None:
         reply_markup=kb([btn("‹ Coupons", "adm:cp")]))
 
 
+# ============================================================ server 2
+async def server2_screen(update: Update, context: Ctx) -> None:
+    markup = await db.get_setting("server2_markup")
+    usd_inr = await db.get_setting("server2_usd_inr")
+    configured = provider.configured()
+    balance = "—"
+    if configured:
+        try:
+            balance = await provider.get_balance()
+        except provider.ProviderError:
+            balance = "⚠️ API unavailable"
+
+    text = card(
+        "🔌 Server 2 [TG-Lion]",
+        row("Status", "🟢 Configured" if configured else "🔴 Not configured"),
+        row("💰 Provider balance", e(balance)),
+        row("📈 Commission", f"{e(markup)}%"),
+        row("💱 USD/INR", e(usd_inr)),
+        "",
+        "Server 2 uses TG-Lion API stock only. It is never merged with Server 1.",
+    )
+    await show(update, text, kb(
+        [btn("📈 Change Commission", "adm:s2markup"),
+         btn("💱 Change USD/INR", "adm:s2rate")],
+        [btn("🔄 Test / Refresh", "adm:s2")],
+        back("adm"),
+    )
+
+
+@on_input("s2markup", admin=True)
+async def server2_markup_input(update: Update, context: Ctx, state: dict) -> None:
+    try:
+        value = float(update.message.text.strip())
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Send a non-negative percentage.")
+        return
+    clear_state(context)
+    await db.set_setting("server2_markup", str(round(value, 2)))
+    await update.message.reply_text(
+        f"✅ Server 2 commission updated to <b>{value:g}%</b>.",
+        reply_markup=kb([btn("‹ Server 2", "adm:s2")]),
+    )
+
+
+@on_input("s2rate", admin=True)
+async def server2_rate_input(update: Update, context: Ctx, state: dict) -> None:
+    try:
+        value = float(update.message.text.strip())
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Send a positive USD/INR rate.")
+        return
+    clear_state(context)
+    await db.set_setting("server2_usd_inr", str(round(value, 4)))
+    await update.message.reply_text(
+        f"✅ Server 2 USD/INR rate updated to <b>{value:g}</b>.",
+        reply_markup=kb([btn("‹ Server 2", "adm:s2")]),
+    )
+
+
 # ============================================================= settings
 async def settings_screen(update: Update, context: Ctx) -> None:
     lines, rows = [], []
@@ -670,6 +737,14 @@ async def admin_cb(update: Update, context: Ctx) -> None:
         await db.delete_coupon(args[0])
         await query.answer("Code deleted")
         await coupons_screen(update, context)
+    elif action == "s2":
+        await server2_screen(update, context)
+    elif action == "s2markup":
+        await ask(update, context, "s2markup", "adm:s2",
+                  "📈 Send the new Server 2 commission percentage.")
+    elif action == "s2rate":
+        await ask(update, context, "s2rate", "adm:s2",
+                  "💱 Send the current USD → INR conversion rate.")
     elif action == "set":
         await settings_screen(update, context)
     elif action == "sv":

@@ -45,7 +45,7 @@ class PurchaseError(Exception):
 class Database:
     COLLECTIONS = (
         "users", "countries", "accounts", "orders", "deposits",
-        "transactions", "coupons", "coupon_uses", "settings", "counters",
+        "transactions", "coupons", "coupon_uses", "settings", "counters", "server2_orders",
     )
 
     def __init__(self, uri: str, database_name: str):
@@ -89,6 +89,8 @@ class Database:
         await self.database.transactions.create_index(
             [("user_id", ASCENDING), ("_id", DESCENDING)]
         )
+        await self.database.server2_orders.create_index([("user_id", ASCENDING), ("_id", DESCENDING)])
+        await self.database.server2_orders.create_index([("number", ASCENDING)], unique=True)
         await self.database.coupon_uses.create_index(
             [("code", ASCENDING), ("user_id", ASCENDING)], unique=True
         )
@@ -449,6 +451,75 @@ class Database:
     async def recent_orders(self, limit: int = 15) -> list[dict]:
         cursor = self.database.orders.find().sort("_id", DESCENDING).limit(limit)
         return [await self._order_out(order) async for order in cursor]
+
+    # ---------------------------------------------------------- server 2 orders
+    async def reserve_server2_balance(self, user_id: int, amount: float, note: str) -> float:
+        """Reserve wallet funds before a provider purchase."""
+        async with self.tx() as session:
+            return await self._change_balance(
+                session, user_id, -round(amount, 2), "server2_purchase", note
+            )
+
+    async def refund_server2_balance(self, user_id: int, amount: float, note: str) -> float:
+        async with self.tx() as session:
+            return await self._change_balance(
+                session, user_id, round(amount, 2), "refund", note
+            )
+
+    async def create_server2_order(
+        self,
+        user_id: int,
+        country_code: str,
+        country_name: str,
+        provider_price_usd: float,
+        price: float,
+        number: str,
+        code: str = "",
+        password: str = "",
+    ) -> int:
+        async with self.tx() as session:
+            order_id = await self._next_id("server2_orders", session)
+            await self.database.server2_orders.insert_one({
+                "_id": order_id,
+                "user_id": user_id,
+                "country_code": country_code.upper(),
+                "country_name": country_name,
+                "provider_price_usd": round(provider_price_usd, 4),
+                "price": round(price, 2),
+                "number": number,
+                "code": code or None,
+                "password": password or None,
+                "status": "delivered",
+                "created_at": now(),
+            }, session=session)
+            await self.database.users.update_one(
+                {"_id": user_id},
+                {"$inc": {"total_spent": round(price, 2)}},
+                session=session,
+            )
+            return order_id
+
+    async def get_server2_order(self, order_id: int) -> Optional[dict]:
+        doc = await self.database.server2_orders.find_one({"_id": order_id})
+        return self._plain(doc) | {"id": doc["_id"]} if doc else None
+
+    async def update_server2_credentials(
+        self, order_id: int, code: str, password: str
+    ) -> Optional[dict]:
+        await self.database.server2_orders.update_one(
+            {"_id": order_id},
+            {"$set": {"code": code or None, "password": password or None}},
+        )
+        return await self.get_server2_order(order_id)
+
+    async def server2_orders(self, user_id: int, offset: int, limit: int) -> list[dict]:
+        cursor = self.database.server2_orders.find({"user_id": user_id}).sort(
+            "_id", DESCENDING
+        ).skip(offset).limit(limit)
+        return [self._plain(doc) | {"id": doc["_id"]} async for doc in cursor]
+
+    async def count_server2_orders(self, user_id: int) -> int:
+        return await self.database.server2_orders.count_documents({"user_id": user_id})
 
     # ------------------------------------------------------------- deposits
     async def create_deposit(self, user_id: int, amount: float) -> int:
