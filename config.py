@@ -37,4 +37,6 @@ DEFAULT_SETTINGS = {
     "ref_percent": os.getenv("REFERRAL_PERCENT", "5"),
     "otp_hours": os.getenv("OTP_WINDOW_HOURS", "24"),
     "maintenance": "0",
+    "server2_markup": os.getenv("SERVER2_MARKUP_PERCENT", "10"),
+    "server2_usd_inr": os.getenv("SERVER2_USD_INR", "90"),
 }
