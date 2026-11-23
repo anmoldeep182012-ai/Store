@@ -18,7 +18,7 @@ from core import (
     Ctx, clear_state, is_admin, notify_admins, on_input, send, set_state, show,
 )
 from database import PurchaseError, db
-from ui.theme import back, blue, btn, card, e, green, kb, money, pager, red, row
+from ui.theme import back, blue, btn, card, e, green, kb, money, pager, red, row, url_btn
 
 
 PAGE_SIZE = 8
@@ -247,9 +247,8 @@ async def market_order_cb(update: Update, context: Ctx) -> None:
     )
     rows = []
     if order.get("invite_link") and order["status"] == "awaiting_join":
-        rows.append([blue("🔗 Open Invite Link", "noop")])
+        rows.append([url_btn("🔗 Open Personal Invite", order["invite_link"], "primary")])
         await show(update, text, kb(*rows, [btn("‹ Orders", "market:orders"), btn("🏠 Home", "home")]))
-        await query.message.reply_text(f"🔗 Personal invite:\n{e(order['invite_link'])}")
         return
     await show(update, text, kb([btn("‹ Orders", "market:orders"), btn("🏠 Home", "home")]))
 
@@ -447,16 +446,13 @@ async def marketplace_chat_member(update: Update, context: Ctx) -> None:
     changed_user = member_update.new_chat_member.user
     new_status = member_update.new_chat_member.status
 
+    # Invite orders are completed only by their order-specific join-request
+    # handler below; a normal public join must never complete a paid order.
     order = None
     verification = None
     if new_status == ChatMemberStatus.OWNER:
         order = await db.find_pending_transfer_order(chat_id, changed_user.id)
         verification = "telegram_creator_transfer"
-    elif new_status in (
-        ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
-    ):
-        order = await db.find_pending_invite_order(chat_id, changed_user.id)
-        verification = "telegram_invite_join"
 
     if not order:
         return
@@ -508,6 +504,28 @@ async def marketplace_join_request(update: Update, context: Ctx) -> None:
         ))
         return
     await request.approve()
+    try:
+        current = await context.bot.get_chat_member(request.chat.id, request.from_user.id)
+    except Exception:
+        return
+    if current.status not in (
+        ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
+    ):
+        return
+    completed = await db.complete_marketplace_order(
+        order["id"], request.from_user.id, "telegram_order_invite_join"
+    )
+    if completed:
+        await send(context, request.from_user.id, card(
+            f"✅ Marketplace Order #{order['id']} Completed",
+            row("Listing", e(order["listing_title"])),
+            "Telegram confirmed that you joined using your personal invite link.",
+            row("Paid", money(order["price"])),
+        ))
+        await send(context, order["seller_admin_id"], card(
+            f"✅ Marketplace Order #{order['id']} Completed",
+            f"Buyer joined <b>{e(order['listing_title'])}</b> using the order-specific invite.",
+        ))
 
 
 def register(app: Application) -> None:
