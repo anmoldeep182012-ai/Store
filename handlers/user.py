@@ -88,7 +88,7 @@ async def server1_shop_cb(update: Update, context: Ctx) -> None:
     page = int(query.data.split(":")[1])
     countries = await db.countries()
     if not countries:
-        await show(update, card("🛒 Store", "No countries are listed yet. Please check back soon."),
+        await show(update, card("🛒 HarryStore", "No countries are listed yet. Please check back soon."),
                    kb(back()))
         return
 
