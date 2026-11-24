@@ -177,7 +177,7 @@ async def market_buy_cb(update: Update, context: Ctx) -> None:
         try:
             invite = await context.bot.create_chat_invite_link(
                 chat_id=listing["chat_id"],
-                name=f"Store order #{order['id']}",
+                name=f"HarryStore order #{order['id']}",
                 expire_date=datetime.now(timezone.utc) + timedelta(hours=24),
                 creates_join_request=True,
             )
