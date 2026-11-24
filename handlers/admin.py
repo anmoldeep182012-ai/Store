@@ -145,7 +145,7 @@ async def dashboard(update: Update, context: Ctx) -> None:
         row("7 days", f"{money(s['week'][0])} • {s['week'][1]} orders"),
         row("All time", f"{money(s['all'][0])} • {s['all'][1]} orders"),
         "",
-        "<b>📊 Store</b>",
+        "<b>📊 HarryStore</b>",
         row("Users", f"{s['users']} (+{s['users_today']} today)"),
         row("Stock / Sold", f"{s['stock']} / {s['sold']}"),
         row("Deposits approved", money(s["deposits"])),
@@ -163,7 +163,7 @@ async def dashboard(update: Update, context: Ctx) -> None:
         [blue("🔌 Server 2 [TG-Lion]", "adm:s2")],
         [blue("📢 Channels & Groups", "mktadm")],
         [btn("💾 Backup", "adm:backup"), btn("🔄 Refresh", "adm")],
-        [btn("🏠 Exit to Store", "home")],
+        [btn("🏠 Exit to HarryStore", "home")],
     ))
 
 
