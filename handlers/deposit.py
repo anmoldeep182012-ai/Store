@@ -104,7 +104,7 @@ async def start_payment(update: Update, context: Ctx, amount: float) -> None:
         return
 
     upi_id = await db.get_setting("upi_id")
-    upi_name = await db.get_setting("upi_name") or "Store"
+    upi_name = await db.get_setting("upi_name") or "HarryStore"
     deposit_id = await db.create_deposit(user_id, amount)
     link = upi_link(upi_id, upi_name, amount, f"DEP{deposit_id}")
 
