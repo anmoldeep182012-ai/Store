@@ -1,6 +1,6 @@
-# 🛒 Telegram Account Store Bot
+# 🛍️ HarryStore — Telegram Account Marketplace Bot
 
-A Telegram bot for selling Telegram accounts, with colored buttons, UPI deposits, instant delivery, and a button-driven admin panel.
+HarryStore is a Telegram bot for selling Telegram accounts, with colored buttons, UPI deposits, instant delivery, and a button-driven admin panel.
 
 Built with **python-telegram-bot 22.8** (Bot API 10.0) and MongoDB (PyMongo async client).
 
@@ -70,8 +70,8 @@ Tested commands for Ubuntu 22.04 / 24.04. Connect to the server over SSH (Termiu
 sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
 
 # 2. Download the bot
-git clone https://github.com/surojbera1000/Store.git
-cd Store
+git clone https://github.com/anmoldeep182012-ai/Store.git HarryStore
+cd HarryStore
 
 # 3. Install dependencies
 python3 -m venv .venv
@@ -88,9 +88,9 @@ nano .env
 Install it as a service so it keeps running after you close Termius and restarts on crash or reboot:
 
 ```bash
-sudo tee /etc/systemd/system/store-bot.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/harry-store.service > /dev/null <<EOF
 [Unit]
-Description=Telegram Store Bot
+Description=HarryStore Telegram Bot
 After=network-online.target
 
 [Service]
@@ -105,7 +105,7 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now store-bot
+sudo systemctl enable --now harry-store
 ```
 
 Useful commands:
