@@ -25,11 +25,11 @@ TG_LION_BASE_URL = os.getenv("TG_LION_BASE_URL", "https://tg-lion.net/")
 API_ID = int(os.getenv("API_ID") or 0)
 API_HASH = os.getenv("API_HASH", "")
 MONGODB_URI = os.getenv("MONGODB_URI", "")
-MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "store_bot")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "harry_store")
 SESSION_ENCRYPTION_KEY = os.getenv("SESSION_ENCRYPTION_KEY", "")
 
 DEFAULT_SETTINGS = {
-    "store_name": os.getenv("STORE_NAME", "Premium Account Store"),
+    "store_name": os.getenv("STORE_NAME", "HarryStore"),
     "upi_id": os.getenv("UPI_ID", ""),
     "upi_name": os.getenv("UPI_NAME", ""),
     "support": os.getenv("SUPPORT_CONTACT", ""),
